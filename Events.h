@@ -299,51 +299,21 @@ class BusyClient : public Client
 
 //=================================================================================
 //
-// RequestQueue
-//
-// The default REQUESTQUEUE
-//
-// You never need this class - just define your own when this doesn't suffice.
+// Server
 //
 
 template<class TYPE>
-class RequestQueue
+class Server
 {
-  using requests_type = std::deque<typename Types<TYPE>::request_ptr>;
+  using request_ptr = typename Types<TYPE>::request_ptr;
+  using requests_type = std::vector<request_ptr>;
 
  private:
   requests_type m_requests;
 
  protected:
-  void add_request(typename Types<TYPE>::request_ptr request) { m_requests.push_back(request); }
+  void add_request(request_ptr request) { m_requests.push_back(request); }
 
- public:
-  void trigger(TYPE const& type);
-};
-
-//-----------------------------------------------------------------------------
-//
-// Implementation of methods of RequestQueue.
-//
-
-template<class TYPE>
-void RequestQueue<TYPE>::trigger(TYPE const& type)
-{
-  for (auto&& request : m_requests)
-  {
-    request->handle(type);
-  }
-  m_requests.clear();
-}
-
-//=================================================================================
-//
-// Server
-//
-
-template<class TYPE, class REQUESTQUEUE = RequestQueue<TYPE>>
-class Server : public REQUESTQUEUE
-{
  public:
   // Add callback request.
   void operator()(Client const& client, typename Types<TYPE>::callback callback)
@@ -357,6 +327,22 @@ class Server : public REQUESTQUEUE
     ASSERT(0 <= n && n < number_of_busy_interfaces);
     this->add_request(NEW(Request<TYPE>(client.client_tracker(), callback, client.busy_interface(n))));
   }
+
+  void trigger(TYPE const& type, bool clear_requests = true);
 };
+
+//-----------------------------------------------------------------------------
+//
+// Implementation of methods of Server.
+//
+
+template<class TYPE>
+void Server<TYPE>::trigger(TYPE const& type, bool clear_requests)
+{
+  for (auto&& request : m_requests)
+    request->handle(type);
+  if (clear_requests)
+    m_requests.clear();
+}
 
 } // namespace event

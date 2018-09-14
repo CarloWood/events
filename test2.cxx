@@ -30,23 +30,7 @@ class FooEventType : public EventData
   using EventData::EventData;
 };
 
-class FooEventRequestQueue
-{
-  using event_requests_type = std::list<event::Types<FooEventType>::request_ptr>;
-  event_requests_type m_event_requests;
- protected:
-  void add_request(event::Types<FooEventType>::request_ptr request) { m_event_requests.push_back(request); }
- public:
-  void trigger(FooEventType const& data);
-};
-
-void FooEventRequestQueue::trigger(FooEventType const& data)
-{
-  for (auto&& event_request : m_event_requests)
-    event_request->handle(data);
-}
-
-using FooEventServer = event::Server<FooEventType, FooEventRequestQueue>;
+using FooEventServer = event::Server<FooEventType>;
 
 //-----------------------------------------------------------------------------
 //
@@ -125,7 +109,7 @@ int main()
   BarEventType bartype(200);    // Event data of bar starts at 200.
 
   cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
-  request_foo.trigger(footype);
+  request_foo.trigger(footype, false);
   footype.inc();                // Increment event data of foo to 101.
 
   // Trigger events:
@@ -133,7 +117,7 @@ int main()
   client1.set_busy();
 
   cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
-  request_foo.trigger(footype);
+  request_foo.trigger(footype, false);
   footype.inc();                // Increment event data of foo to 102.
 
   cout << "Trigger bar(" << bartype << ") -> client1:" << endl;
@@ -146,7 +130,7 @@ int main()
   client1.set_busy(1);
 
   cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
-  request_foo.trigger(footype);
+  request_foo.trigger(footype, false);
   footype.inc();
 
   cout << "Trigger bar(" << bartype << ") -> client1:" << endl;
@@ -157,7 +141,7 @@ int main()
   client1.unset_busy();
 
   cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
-  request_foo.trigger(footype);
+  request_foo.trigger(footype, false);
   footype.inc();
 
   cout << "Trigger bar(" << bartype << ") -> client1:" << endl;
