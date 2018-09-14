@@ -12,8 +12,8 @@ void BusyInterface::flush_events()
 #endif
   do
   {
-    events.front()->retrigger();
-    events.pop_front();
+    m_events.front()->retrigger();
+    m_events.pop_front();
   }
   while (m_busy_depth == 1 && !m_events.empty());
 }

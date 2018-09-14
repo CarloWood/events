@@ -29,7 +29,7 @@ void my_callback(MyEventType const& event)
   DoutEntering(dc::notice, "my_callback(" << event << ")");
 }
 
-struct Foo
+struct Foo : public event::Client
 {
   void callback(MyEventType const& event) const
   {
@@ -40,6 +40,14 @@ struct Foo
   {
     DoutEntering(dc::notice, "Foo::callback_with_cookie(" << event << ", " << cookie << ")");
   }
+
+  ~Foo() { cancel_all_requests(); }
+};
+
+class FakeClient : public event::Client
+{
+ public:
+  ~FakeClient() { cancel_all_requests(); }
 };
 
 int main()
@@ -48,24 +56,25 @@ int main()
   using namespace std::placeholders;
 
   // Instantiate the event server for MyEventType (this should become a singleton).
-  event::Server<event::RequestBase<MyEventType>> event_server;
+  event::Server<MyEventType> event_server;
 
   // Register a callback by function pointer.
-  event_server(my_callback);
+  FakeClient fake_client;
+  event_server(fake_client, my_callback);
 
   // Register a member function of object foo as callback.
   Foo const foo;
-  event_server(std::bind(&Foo::callback, &foo, _1));
+  event_server(foo, std::bind(&Foo::callback, &foo, _1));
 
   // Register a member function and pass a cookie.
   double const cookie = 3.1415;
-  event_server(std::bind(&Foo::callback_with_cookie, &foo, _1, cookie));
+  event_server(foo, std::bind(&Foo::callback_with_cookie, &foo, _1, cookie));
 
   // Pass a different cookie.
-  event_server(std::bind(&Foo::callback_with_cookie, &foo, _1, 0.999));
+  event_server(foo, std::bind(&Foo::callback_with_cookie, &foo, _1, 0.999));
 
   // Use a lambda function as callback.
-  event_server([cookie](MyEventType const& event){ Dout(dc::notice, "Calling lambda for event " << event << " and cookie " << cookie); });
+  event_server(fake_client, [cookie](MyEventType const& event){ Dout(dc::notice, "Calling lambda for event " << event << " and cookie " << cookie); });
 
   // Trigger the event.
   event_server.trigger(42);

@@ -40,46 +40,14 @@
 // is busy, the busy interface queues the event and EVENT-DATA till it is not
 // busy anymore. Otherwise the event is passed directly to the client.
 //
-// Example
-// -------
+// Usage
+// -----
 //
-// Assume there is defined a class MyEventType.
+// A client without busy interface:
 //
-// This class will be derived from a class MyEventData, which is conviently
-// accessible as MyEventType::data_type;
-//
-//     I.e.
-//
-//     class MyEventData;                               // EVENT-DATA
-//     class MyEventType : public MyEventData {         // EVENT-TYPE
-//      public:
-//       using data_type = MyEventData;
-//       ...
-//
-// The EVENT-SERVER type of that EVENT-TYPE should be MyEventType::server_type.
-// The static function MyEventType::server() must return a reference to the singleton
-// event server that handles this EVENT-TYPE.
-//
-//       ...
-//       using request_base_type = MyEventRequestBase;
-//       using request_queue_type = MyEventRequestQueue;
-//       using server_type = EventServer<request_base_type, request_queue_type>;
-//       server_type& server();
-//     };
-//
-// The EVENT-SERVER depends on two user defined classes (here called MyEventRequestBase
-// and MyEventRequestQueue).
-//
-//
-// At some place in the code (the event generator) an 'event' happens:
-//
-//     if (3 < x && x > 7 && 9 < y && y < 20)
-//     {
-//       rectangle_events.handle_event(EVENT_37920, x, y);
-//       ^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^
-//         \_event server  \_event trigger   \_event data.
-//
-// where the type of rectangle_events is a class derived from 
+// class MyClient : public event::Client {
+//   ~MyClient() { cancel_all_requests(); }
+// };
 
 #pragma once
 
@@ -87,8 +55,49 @@
 #include "utils/AIRefCount.h"
 #include <deque>
 #include <functional>
+#include <array>
 
 namespace event {
+
+// Forward declarations.
+class Client;
+
+template<class TYPE>
+class Request;
+
+// Event types.
+template<class TYPE>
+struct Types
+{
+  using request = Request<TYPE>;
+  using request_ptr = boost::intrusive_ptr<request>;
+  using callback = std::function<void(TYPE const&)>;
+};
+
+//=================================================================================
+//
+// ClientTracker
+//
+
+class ClientTracker
+{
+ private:
+  Client* m_client;
+  int m_ref_count;
+
+ public:
+  ClientTracker(Client* client) : m_client(client), m_ref_count(1) { }
+
+  void cancel_all_requests() { m_client = nullptr; }
+
+  // Accessor.
+  bool all_requests_canceled() const { return !m_client; }
+
+  void copied() { ++m_ref_count; }
+  void release() { if (--m_ref_count == 0) delete this; }
+
+  void set_client(Client* client) { m_client = client; }
+};
 
 class BusyInterface
 {
@@ -98,7 +107,6 @@ class BusyInterface
 
   class QueuedEventBase
   {
-    virtual ~QueuedEventBase() { }
     friend void BusyInterface::flush_events();
     virtual void retrigger() = 0;
   };
@@ -106,19 +114,19 @@ class BusyInterface
  public:
   // Queue the event "request / type".
   // This event will be handled as soon as `unset_busy' is called while m_busy_depth is 1.
-  template<class REQUESTBASE>
-  inline void queue(boost::intrusive_ptr<REQUESTBASE> request, typename REQUESTBASE::event_type_type const& type);
+  template<class TYPE>
+  inline void queue(typename Types<TYPE>::request_ptr request, TYPE const& type);
 
  private:
-  template<class REQUESTBASE>
-  class QueuedEvent : public QueuedEventBase
+  template<class TYPE>
+  class QueuedEvent final : public QueuedEventBase
   {
    private:
-    boost::intrusive_ptr<REQUESTBASE> m_request;
-    typename REQUESTBASE::event_type_type const& m_type;
+    typename Types<TYPE>::request_ptr m_request;
+    TYPE const m_type;
    private:
-    friend void BusyInterface::queue<REQUESTBASE>(boost::intrusive_ptr<REQUESTBASE>, typename REQUESTBASE::event_type_type const&);
-    QueuedEvent(boost::intrusive_ptr<REQUESTBASE> request, typename REQUESTBASE::event_type_type const& type) : m_request(request), m_type(type) { }
+    friend void BusyInterface::queue<TYPE>(typename Types<TYPE>::request_ptr, TYPE const&);
+    QueuedEvent(typename Types<TYPE>::request_ptr request, TYPE const& type) : m_request(request), m_type(type) { }
    private:
     void retrigger() override { m_request->rehandle(m_type); delete this; }
   };
@@ -142,25 +150,70 @@ class BusyInterface
 
   // Decrement busy depth counter and flush all queued events, if any, when the interface becomes not busy.
   void unset_busy();
-
-  //
-  // BusyInterface::None
-  //
-  // A special Busy Interface which is used for Event Requests for which the
-  // Event Client is never busy. Compiler optimization should completely get
-  // rid of the busy interface code when this is used.
-  //
-  class None {
-   public:
-    bool is_busy() const { return false; }
-    void set_busy() const { }
-    void unset_busy() const { }
-    template<class REQUESTBASE>
-    void queue(boost::intrusive_ptr<REQUESTBASE> UNUSED_ARG(request), typename REQUESTBASE::event_type_type const& UNUSED_ARG(type)) const { }
-  };
-
-  static constexpr None none{};
 };
+
+template<class TYPE>
+class Request : public AIRefCount
+{
+ private:
+  ClientTracker* m_client_tracker;
+  typename Types<TYPE>::callback m_callback;
+  BusyInterface* m_busy_interface;
+
+ public:
+  // The event occured, pass `type' to the client that requested it,
+  // by calling its call back function (or queuing it on the Busy Interface).
+  bool handle(TYPE const& type);
+
+  // Called when the request was queued and the client becomes unbusy.
+  void rehandle(TYPE const& type);
+
+ public:
+  // Constructed by the event Server when a Client requests to be notified about its event.
+  Request(ClientTracker* client_tracker, typename Types<TYPE>::callback callback) :
+      m_client_tracker(client_tracker), m_callback(callback), m_busy_interface(nullptr) { client_tracker->copied(); }
+
+  // Constructed by the event Server when a Client requests to be notified about its event.
+  Request(ClientTracker* client_tracker, typename Types<TYPE>::callback callback, BusyInterface& busy_interface) :
+      m_client_tracker(client_tracker), m_callback(callback), m_busy_interface(&busy_interface) { client_tracker->copied(); }
+
+  // You shouldn't use this.
+  Request(Request const&) = delete;
+
+  bool canceled() const { return m_client_tracker->all_requests_canceled(); }
+
+ protected:
+  // Destructor.
+  virtual ~Request() { m_client_tracker->release(); }
+};
+
+template<class TYPE>
+bool Request<TYPE>::handle(TYPE const& type)
+{
+  if (m_client_tracker->all_requests_canceled())
+    return true;
+  if (!m_busy_interface)
+    m_callback(type);
+  else if (m_busy_interface->is_busy())
+    m_busy_interface->queue(this, type);
+  else
+  {
+    m_busy_interface->set_busy();
+    m_callback(type);
+    m_busy_interface->unset_busy();
+  }
+  return false;
+}
+
+template<class TYPE>
+void Request<TYPE>::rehandle(TYPE const& type)
+{
+#ifndef CWDEBUG
+  if (!m_busy_interface || !m_busy_interface.is_busy())
+    DoutFatal(dc::core, "Calling event::Request<TYPE>::rehandle() without busy BusyInterface.");
+#endif
+  m_callback(type);
+}
 
 //-----------------------------------------------------------------------------
 //
@@ -169,7 +222,7 @@ class BusyInterface
 
 inline void BusyInterface::unset_busy()
 {
-  if (m_busy_depth == 1&& !m_events.empty())
+  if (m_busy_depth == 1 && !m_events.empty())
     flush_events();
 #ifdef CWDEBUG
   if (m_busy_depth == 0)
@@ -178,39 +231,13 @@ inline void BusyInterface::unset_busy()
   --m_busy_depth;
 }
 
-template<class REQUESTBASE>
-inline void BusyInterface::queue(boost::intrusive_ptr<REQUESTBASE> request, typename REQUESTBASE::event_type_type const& type)
+template<class TYPE>
+inline void BusyInterface::queue(typename Types<TYPE>::request_ptr request, TYPE const& type)
 {
-  QueuedEvent<REQUESTBASE>* queued_event = new QueuedEvent<REQUESTBASE>(request, type);
+  QueuedEvent<TYPE>* queued_event = new QueuedEvent<TYPE>(request, type);
   AllocTag1(queued_event);
   m_events.push_back(queued_event);
 }
-
-//=================================================================================
-//
-// ClientTracker
-//
-
-class Client;
-class ClientTracker
-{
- private:
-  Client* m_client;
-  int m_ref_count;
-
- public:
-  ClientTracker(Client* client) : m_client(client), m_ref_count(1) { }
-
-  void cancel_all_requests() { m_client = nullptr; }
-
-  // Accessor.
-  bool all_requests_canceled() const { return !m_client; }
-
-  void copied() { ++m_ref_count; }
-  void release() { if (--m_ref_count == 0) delete this; }
-
-  void set_client(Client* client) { m_client = client; }
-};
 
 //=================================================================================
 //
@@ -255,35 +282,19 @@ class Client
   ClientTracker* client_tracker() const { return m_client_tracker; }
 };
 
-template<class TYPE>
-class RequestBase : public AIRefCount
+template<int number_of_busy_interfaces = 1>
+class BusyClient : public Client
 {
- public:
-  using event_type_type = TYPE;
+  using Client::Client;
 
- protected:
-  ClientTracker* m_client_tracker;
-
- public:
-  // The event occured, pass `type' to the client that requested it,
-  // by calling its call back function (or queuing it on the Busy Interface).
-  virtual bool handle(TYPE const& type) = 0;
-
-  // Called when the request was queued and the client becomes unbusy.
-  virtual void rehandle(TYPE const& type) = 0;
+ private:
+  std::array<BusyInterface, number_of_busy_interfaces> m_busy_interfaces;
 
  public:
-  // Constructed by the event Server when a Client requests to be notified about its event.
-  RequestBase(ClientTracker* client_tracker) : m_client_tracker(client_tracker) { client_tracker->copied(); }
+  BusyInterface& busy_interface(int n) { return m_busy_interfaces[n]; }
 
-  // You shouldn't use this.
-  RequestBase(RequestBase const&) = delete;
-
-  bool canceled() const { return m_client_tracker->all_requests_canceled(); }
-
- protected:
-  // Destructor.
-  virtual ~RequestBase() { m_client_tracker->release(); }
+  void set_busy(int n = 0) { m_busy_interfaces[n].set_busy(); }
+  void unset_busy(int n = 0) { m_busy_interfaces[n].unset_busy(); }
 };
 
 //=================================================================================
@@ -295,30 +306,19 @@ class RequestBase : public AIRefCount
 // You never need this class - just define your own when this doesn't suffice.
 //
 
-template<class REQUESTBASE>
+template<class TYPE>
 class RequestQueue
 {
-  using event_type_type = typename REQUESTBASE::event_type_type;
-  using requests_type = std::deque<boost::intrusive_ptr<REQUESTBASE>>
+  using requests_type = std::deque<typename Types<TYPE>::request_ptr>;
 
  private:
   requests_type m_requests;
 
  protected:
-  void add_request(boost::intrusive_ptr<REQUESTBASE> request) { m_requests.push_back(request); }
+  void add_request(typename Types<TYPE>::request_ptr request) { m_requests.push_back(request); }
 
  public:
-  void trigger(event_type_type const& type);
-
-#if 0
-  // Add callback request.
-  void operator()(std::function<void(event_type_type const&)> callback) { m_queue.push_back(callback); }
-
-  template<typename... Args>
-  void trigger(Args&&... args) { trigger(static_cast<event_type_type const&>(event_type_type(std::forward<Args>(args)...))); }
-
-  void trigger(event_type_type const& type);
-#endif
+  void trigger(TYPE const& type);
 };
 
 //-----------------------------------------------------------------------------
@@ -326,8 +326,8 @@ class RequestQueue
 // Implementation of methods of RequestQueue.
 //
 
-template<class REQUESTBASE>
-void RequestQueue<REQUESTBASE>::trigger(event_type_type const& type)
+template<class TYPE>
+void RequestQueue<TYPE>::trigger(TYPE const& type)
 {
   for (auto&& request : m_requests)
   {
@@ -341,10 +341,22 @@ void RequestQueue<REQUESTBASE>::trigger(event_type_type const& type)
 // Server
 //
 
-template<class REQUESTBASE, class REQUESTQUEUE = RequestQueue<REQUESTBASE>>
+template<class TYPE, class REQUESTQUEUE = RequestQueue<TYPE>>
 class Server : public REQUESTQUEUE
 {
-  using event_type_type = typename REQUESTBASE::event_type_type;
+ public:
+  // Add callback request.
+  void operator()(Client const& client, typename Types<TYPE>::callback callback)
+  {
+    this->add_request(NEW(Request<TYPE>(client.client_tracker(), callback)));
+  }
+
+  template<int number_of_busy_interfaces>
+  void operator()(BusyClient<number_of_busy_interfaces>& client, typename Types<TYPE>::callback callback, int n = 0)
+  {
+    ASSERT(0 <= n && n < number_of_busy_interfaces);
+    this->add_request(NEW(Request<TYPE>(client.client_tracker(), callback, client.busy_interface(n))));
+  }
 };
 
 } // namespace event
