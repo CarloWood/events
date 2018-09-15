@@ -63,7 +63,8 @@ int main()
   event_server(fake_client, my_callback);
 
   // Register a member function of object foo as callback.
-  Foo const foo;
+  Foo foo;
+  foo.lock();
   event_server(foo, std::bind(&Foo::callback, &foo, _1));
 
   // Register a member function and pass a cookie.

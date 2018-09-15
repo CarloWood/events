@@ -259,6 +259,7 @@ class Client
  public:
   Client() : m_the_real_me(nullptr) { m_client_tracker = NEW(ClientTracker(this)); }
   Client(Client const& client) : m_client_tracker(client.m_client_tracker), m_the_real_me(nullptr) { client.m_client_tracker->copied(); }
+  void operator=(Client&& client) { ASSERT(!client.m_the_real_me); m_client_tracker = client.m_client_tracker; client.m_client_tracker = nullptr; }
 #ifdef CWDEBUG
   ~Client()
   {
