@@ -25,9 +25,10 @@ class EventData
 // FooEventServer: an EventServer
 //
 
-class FooEventType : public EventData
+struct FooEventType : public EventData
 {
   using EventData::EventData;
+  static constexpr bool one_shot = false;
 };
 
 using FooEventServer = event::Server<FooEventType>;
@@ -37,12 +38,10 @@ using FooEventServer = event::Server<FooEventType>;
 // BarEventServer: another EventServer
 //
 
-class BarEventType : public EventData
+struct BarEventType : public EventData
 {
- public:
-  using event_request_data_type = void;
-  BarEventType(int i) : EventData(i) { }
-  bool check_range() const { return true; }
+  using EventData::EventData;
+  static constexpr bool one_shot = true;
 };
 
 using BarEventServer = event::Server<BarEventType>;
@@ -109,7 +108,7 @@ int main()
   BarEventType bartype(200);    // Event data of bar starts at 200.
 
   cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
-  request_foo.trigger(footype, false);
+  request_foo.trigger(footype);
   footype.inc();                // Increment event data of foo to 101.
 
   // Trigger events:
@@ -117,7 +116,7 @@ int main()
   client1.set_busy();
 
   cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
-  request_foo.trigger(footype, false);
+  request_foo.trigger(footype);
   footype.inc();                // Increment event data of foo to 102.
 
   cout << "Trigger bar(" << bartype << ") -> client1:" << endl;
@@ -130,7 +129,7 @@ int main()
   client1.set_busy(1);
 
   cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
-  request_foo.trigger(footype, false);
+  request_foo.trigger(footype);
   footype.inc();
 
   cout << "Trigger bar(" << bartype << ") -> client1:" << endl;
@@ -141,7 +140,7 @@ int main()
   client1.unset_busy();
 
   cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
-  request_foo.trigger(footype, false);
+  request_foo.trigger(footype);
   footype.inc();
 
   cout << "Trigger bar(" << bartype << ") -> client1:" << endl;

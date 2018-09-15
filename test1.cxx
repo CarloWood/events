@@ -8,21 +8,21 @@ class MyEventData
 
  public:
   MyEventData(int n) : m_n(n) { }
+
+  friend std::ostream& operator<<(std::ostream& os, MyEventData const& data);
 };
 
-class MyEventType : public MyEventData
+std::ostream& operator<<(std::ostream& os, MyEventData const& data)
 {
-  using MyEventData::MyEventData;
-
- public:
-  friend std::ostream& operator<<(std::ostream& os, MyEventType const& event);
-};
-
-std::ostream& operator<<(std::ostream& os, MyEventType const& event)
-{
-  os << "MyEventType:{" << event.m_n << "}";
+  os << "MyEventData:{" << data.m_n << "}";
   return os;
 }
+
+struct MyEventType : public MyEventData
+{
+  using MyEventData::MyEventData;
+  static constexpr bool one_shot = true;
+};
 
 void my_callback(MyEventType const& event)
 {

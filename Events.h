@@ -48,6 +48,12 @@
 // class MyClient : public event::Client {
 //   ~MyClient() { cancel_all_requests(); }
 // };
+//
+// A client with one or more (N) busy interfaces:
+//
+// class MyClient : public event::BusyClient<N> {
+//   ~MyClient() { cancel_all_requests(); }
+// };
 
 #pragma once
 
@@ -318,17 +324,17 @@ class Server
   // Add callback request.
   void operator()(Client const& client, typename Types<TYPE>::callback callback)
   {
-    this->add_request(NEW(Request<TYPE>(client.client_tracker(), callback)));
+    add_request(NEW(Request<TYPE>(client.client_tracker(), callback)));
   }
 
   template<int number_of_busy_interfaces>
   void operator()(BusyClient<number_of_busy_interfaces>& client, typename Types<TYPE>::callback callback, int n = 0)
   {
     ASSERT(0 <= n && n < number_of_busy_interfaces);
-    this->add_request(NEW(Request<TYPE>(client.client_tracker(), callback, client.busy_interface(n))));
+    add_request(NEW(Request<TYPE>(client.client_tracker(), callback, client.busy_interface(n))));
   }
 
-  void trigger(TYPE const& type, bool clear_requests = true);
+  void trigger(TYPE const& type);
 };
 
 //-----------------------------------------------------------------------------
@@ -337,11 +343,11 @@ class Server
 //
 
 template<class TYPE>
-void Server<TYPE>::trigger(TYPE const& type, bool clear_requests)
+void Server<TYPE>::trigger(TYPE const& type)
 {
   for (auto&& request : m_requests)
     request->handle(type);
-  if (clear_requests)
+  if (TYPE::one_shot)
     m_requests.clear();
 }
 
