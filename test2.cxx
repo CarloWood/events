@@ -1,4 +1,5 @@
 #include "sys.h"
+#include "debug.h"
 #include "Events.h"
 #include <iostream>
 #include <list>
@@ -51,38 +52,44 @@ using BarEventServer = event::Server<BarEventType>;
 // Two event clients
 //
 
-class MyEventClient1 : public event::BusyClient<2>      // 0 = foo, 1 = bar.
+class MyEventClient1
 {
   int m_magic;
+  event::BusyInterface m_bi[2];        // 0 = foo, 1 = bar.
+  event::Types<FooEventType>::request_ptr m_foo_request_handle;
+  event::Types<BarEventType>::request_ptr m_bar_request_handle;
  public:
   void handle_foo(FooEventType const& data)
   {
-    std::cout << "  MyEventClient1::foo(" << data << ")" << std::endl;
+    DoutEntering(dc::notice, "MyEventClient1::foo(" << data << ")");
     ASSERT(m_magic == 12345678);
   }
   void handle_bar(BarEventType const& data)
   {
-    std::cout << "  MyEventClient1::bar(" << data << ")" << std::endl;
+    DoutEntering(dc::notice, "MyEventClient1::bar(" << data << ")");
   }
   MyEventClient1() : m_magic(12345678) { }
-  ~MyEventClient1() { cancel_all_requests(); m_magic = 0; }
+  ~MyEventClient1() { m_foo_request_handle.reset(); m_bar_request_handle.reset(); m_magic = 0; }
+
+  void set_busy(int bi = 0) { m_bi[bi].set_busy(); }
+  void unset_busy(int bi = 0) { m_bi[bi].unset_busy(); }
 };
 
 using Cookie = int;
 
-class MyEventClient2 : public event::Client
+class MyEventClient2
 {
   int m_magic;
+  event::Types<FooEventType>::request_ptr m_request_handle;
  public:
   void handle_foo(FooEventType const& data, Cookie cookie)
   {
-    std::cout << "  MyEventClient2::foo(" << data << ")" << std::endl;
+    DoutEntering(dc::notice, "MyEventClient2::foo(" << data << ")");
     ASSERT(cookie == 123);
     ASSERT(m_magic == 123456789);
   }
-  void operator=(MyEventClient2&& client) { event::Client::operator=(std::move(client)); }
   MyEventClient2() : m_magic(123456789) { }
-  ~MyEventClient2() { cancel_all_requests(); m_magic = 0; }
+  ~MyEventClient2() { m_request_handle.reset(); m_magic = 0; }
 };
 
 //=============================================================================
@@ -94,8 +101,8 @@ class MyEventClient2 : public event::Client
 
 int main()
 {
-  using std::cout;
-  using std::endl;
+  Debug(NAMESPACE_DEBUG::init());
+
   using namespace std::placeholders;
 
   FooEventServer request_foo;
@@ -105,68 +112,68 @@ int main()
   BarEventType bartype(200);    // Event data of bar starts at 200.
 
   MyEventClient1 client1;
+  event::request_handle<FooEventType> client1_foo_request;
+  event::request_handle<BarEventType> client1_bar_request;
   {
     MyEventClient2 client2;
+    event::request_handle<FooEventType> client2_foo_request;
     {
       MyEventClient2 client_tmp;
       client2 = std::move(client_tmp);
     }
 
-    client1.lock();
-    //client2.lock();
-
     // Request events for Client1:
-    request_foo(client1, std::bind(&MyEventClient1::handle_foo, &client1, _1));
-    request_bar(client1, std::bind(&MyEventClient1::handle_bar, &client1, _1), 1);
+    client1_foo_request = request_foo.request(client1, &MyEventClient1::handle_foo);
+    client1_bar_request = request_bar.request(client1, &MyEventClient1::handle_bar);
 
     // Request event for Client2:
     Cookie cookie = 123;
-    request_foo(client2, std::bind(&MyEventClient2::handle_foo, &client2, _1, cookie));
+    client2_foo_request = request_foo.request(client2, &MyEventClient2::handle_foo, cookie);
 
-    cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
+    Dout(dc::notice, "Trigger foo(" << footype << ") -> client1, client2:");
     request_foo.trigger(footype);
     footype.inc();                // Increment event data of foo to 101.
 
     // Trigger events:
-    cout << "client1 foo busy:" << endl;
+    Dout(dc::notice, "client1 foo busy:");
     client1.set_busy();
 
-    cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
+    Dout(dc::notice, "Trigger foo(" << footype << ") -> client1, client2:");
     request_foo.trigger(footype);
     footype.inc();                // Increment event data of foo to 102.
 
-    cout << "Trigger bar(" << bartype << ") -> client1:" << endl;
+    Dout(dc::notice, "Trigger bar(" << bartype << ") -> client1:");
     request_bar.trigger(bartype);
     bartype.inc();                // Increment event data of bar to 201.
     // Re-request bar, because that event resets every time.
-    request_bar(client1, std::bind(&MyEventClient1::handle_bar, &client1, _1), 1);
+    client1_bar_request = request_bar.request(client1, &MyEventClient1::handle_bar);
 
-    cout << "client1 bar busy:" << endl;
+    Dout(dc::notice, "client1 bar busy:");
     client1.set_busy(1);
 
-    cout << "Trigger foo(" << footype << ") -> client1, client2:" << endl;
+    Dout(dc::notice, "Trigger foo(" << footype << ") -> client1, client2:");
     request_foo.trigger(footype);
     footype.inc();
 
-    cout << "Trigger bar(" << bartype << ") -> client1:" << endl;
+    Dout(dc::notice, "Trigger bar(" << bartype << ") -> client1:");
     request_bar.trigger(bartype);
     bartype.inc();
 
-    cout << "client1 foo unset busy:" << endl;
+    Dout(dc::notice, "client1 foo unset busy:");
     client1.unset_busy();
 
   } // Destruct client2.
 
-  cout << "Trigger foo(" << footype << ") -> client1, [client2]:" << endl;
+  Dout(dc::notice, "Trigger foo(" << footype << ") -> client1, [client2]:");
   request_foo.trigger(footype);
   footype.inc();
 
-  cout << "Trigger bar(" << bartype << ") -> client1:" << endl;
+  Dout(dc::notice, "Trigger bar(" << bartype << ") -> client1:");
   request_bar.trigger(bartype);
   bartype.inc();
 
-  cout << "client1 bar unset busy:" << endl;
+  Dout(dc::notice, "client1 bar unset busy:");
   client1.unset_busy(1);
 
-  cout << "Leaving main" << endl;
+  Dout(dc::notice, "Leaving main");
 }

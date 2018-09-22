@@ -29,8 +29,10 @@ void my_callback(MyEventType const& event)
   DoutEntering(dc::notice, "my_callback(" << event << ")");
 }
 
-struct Foo : public event::Client
+struct Foo
 {
+  event::Types<MyEventType>::request_ptr m_request_handle;
+
   void callback(MyEventType const& event) const
   {
     DoutEntering(dc::notice, "Foo::callback(" << event << ")");
@@ -41,13 +43,7 @@ struct Foo : public event::Client
     DoutEntering(dc::notice, "Foo::callback_with_cookie(" << event << ", " << cookie << ")");
   }
 
-  ~Foo() { cancel_all_requests(); }
-};
-
-class FakeClient : public event::Client
-{
- public:
-  ~FakeClient() { cancel_all_requests(); }
+  ~Foo() { m_request_handle.reset(); }
 };
 
 int main()
@@ -59,23 +55,22 @@ int main()
   event::Server<MyEventType> event_server;
 
   // Register a callback by function pointer.
-  FakeClient fake_client;
-  event_server(fake_client, my_callback);
+  auto handle1 = event_server.request(my_callback);
 
   // Register a member function of object foo as callback.
   Foo foo;
-  foo.lock();
-  event_server(foo, std::bind(&Foo::callback, &foo, _1));
+  event::request_handle<MyEventType> foo_request[3];
+  foo_request[0] = event_server.request(foo, &Foo::callback);
 
   // Register a member function and pass a cookie.
   double const cookie = 3.1415;
-  event_server(foo, std::bind(&Foo::callback_with_cookie, &foo, _1, cookie));
+  foo_request[1] = event_server.request(foo, &Foo::callback_with_cookie, cookie);
 
   // Pass a different cookie.
-  event_server(foo, std::bind(&Foo::callback_with_cookie, &foo, _1, 0.999));
+  foo_request[2] = event_server.request(foo, &Foo::callback_with_cookie, 0.999);
 
   // Use a lambda function as callback.
-  event_server(fake_client, [cookie](MyEventType const& event){ Dout(dc::notice, "Calling lambda for event " << event << " and cookie " << cookie); });
+  auto handle2 = event_server.request([cookie](MyEventType const& event){ Dout(dc::notice, "Calling lambda for event " << event << " and cookie " << cookie); });
 
   // Trigger the event.
   event_server.trigger(42);

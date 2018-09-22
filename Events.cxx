@@ -18,4 +18,6 @@ void BusyInterface::flush_events()
   while (m_busy_depth == 1 && !m_events.empty());
 }
 
+BusyInterface dummy_busy_interface;
+
 } // namespace event

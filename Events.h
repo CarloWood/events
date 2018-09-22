@@ -59,14 +59,14 @@
 
 #include "debug.h"
 #include "utils/AIRefCount.h"
+#include "utils/NodeMemoryPool.h"
 #include <deque>
 #include <functional>
 #include <array>
+#include <atomic>
+#include <thread>
 
 namespace event {
-
-// Forward declarations.
-class Client;
 
 template<class TYPE>
 class Request;
@@ -80,30 +80,10 @@ struct Types
   using callback = std::function<void(TYPE const&)>;
 };
 
-//=================================================================================
-//
-// ClientTracker
-//
+template<class TYPE> using request_handle = typename Types<TYPE>::request_ptr;
 
-class ClientTracker
-{
- private:
-  Client* m_client;
-  int m_ref_count;
-
- public:
-  ClientTracker(Client* client) : m_client(client), m_ref_count(1) { }
-
-  void cancel_all_requests() { m_client = nullptr; }
-
-  // Accessor.
-  bool all_requests_canceled() const { return !m_client; }
-
-  void copied() { ++m_ref_count; }
-  void release() { if (--m_ref_count == 0) delete this; }
-
-  void set_client(Client* client) { m_client = client; }
-};
+template<class TYPE>
+class Request;
 
 class BusyInterface
 {
@@ -121,24 +101,26 @@ class BusyInterface
   // Queue the event "request / type".
   // This event will be handled as soon as `unset_busy' is called while m_busy_depth is 1.
   template<class TYPE>
-  inline void queue(typename Types<TYPE>::request_ptr request, TYPE const& type);
+  inline void queue(Request<TYPE>* request, TYPE const& type);
 
  private:
   template<class TYPE>
   class QueuedEvent final : public QueuedEventBase
   {
+    using request_ptr_type = typename Types<TYPE>::request_ptr;
    private:
-    typename Types<TYPE>::request_ptr m_request;
+    request_ptr_type m_request;
     TYPE const m_type;
    private:
-    friend void BusyInterface::queue<TYPE>(typename Types<TYPE>::request_ptr, TYPE const&);
-    QueuedEvent(typename Types<TYPE>::request_ptr request, TYPE const& type) : m_request(request), m_type(type) { }
+    friend void BusyInterface::queue<TYPE>(Request<TYPE>*, TYPE const&);
+    QueuedEvent(Request<TYPE>* request, TYPE const& type) : m_request(request), m_type(type) { }
    private:
     void retrigger() override { m_request->rehandle(m_type); delete this; }
   };
 
  private:
-  unsigned int m_busy_depth;                    // Busy depth counter.  The client is busy when this is larger than zero.
+  std::mutex m_mutex;                           // Mutex to protect the consistency of this class.
+  std::atomic_uint m_busy_depth;                // Busy depth counter.  The client is busy when this is larger than zero.
   std::list<QueuedEventBase*> m_events;         // List with pointers to queued events that could not be handled at the moment the event
                                                 // occurred because the client was busy.
 
@@ -146,69 +128,166 @@ class BusyInterface
   // Constructor
   BusyInterface() : m_busy_depth(0) { }
 
-  // Accessors
-  bool is_busy() const { return m_busy_depth > 0; }
-
-  // Manipulators
-
-  // Increment busy depth counter.
-  void set_busy() { ++m_busy_depth; }
+  // Increment busy depth counter, returns true if the previous value was 0,
+  // which means that we are now allowed to call the callback. Otherwise
+  // the event has to be queued by calling queue().
+  bool set_busy()
+  {
+    DoutEntering(dc::notice, "BusyInterface::set_busy() [" << (void*)this << "]");
+    return m_busy_depth.fetch_add(1) == 0;
+  }
 
   // Decrement busy depth counter and flush all queued events, if any, when the interface becomes not busy.
   void unset_busy();
 };
 
+extern BusyInterface dummy_busy_interface;      // Just to have some address of type BusyInterface*.
+static constexpr BusyInterface* const s_handled = &dummy_busy_interface;
+
 template<class TYPE>
-class Request : public AIRefCount
+class Request
 {
  private:
-  ClientTracker* m_client_tracker;
-  typename Types<TYPE>::callback m_callback;
+  std::atomic_int m_count;      // Reference counter for this object.
+  std::atomic_int m_state;      // If the least signficant bit is set then the requester is
+                                // about to be destroyed and the request should just be ignored.
+                                // If the value is greater than 0 then at least one thread
+                                // is inside handle() and the requester may not destruct (see intrusive_ptr_release below).
+                                // If the value is less than 0 then the requester left intrusive_ptr_release
+                                // and might destruct everything at any moment; therefore in that
+                                // case we may no longer use m_busy_interface or m_callback.
+
+ public:
+  friend void intrusive_ptr_add_ref(Request* ptr)
+  {
+    ptr->m_count.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  friend void intrusive_ptr_release(Request* ptr)
+  {
+    int old_count = ptr->m_count.fetch_sub(1, std::memory_order_release);
+    if (old_count == 2)                                 // In this case the calling thread is about to destruct the object(s) that are needed for the callback.
+    {
+      // Mark that m_busy_interface and the objects needed m_callback are about to be invalidated by setting the least significant bit.
+      ptr->m_state.fetch_sub(1);
+      // Wait with leaving this function (and thus invalidating anything) until all threads left handle().
+      while (ptr->m_state != -1)
+        std::this_thread::yield();
+    }
+    if (old_count == 1)                                 // The last reference was just removed from Server<TYPE>::m_requests.
+    {
+      std::atomic_thread_fence(std::memory_order_acquire);
+      delete ptr;
+    }
+  }
+
+  using callback_type = typename Types<TYPE>::callback;
+
+ private:
   BusyInterface* m_busy_interface;
+  callback_type m_callback;
 
  public:
-  // The event occured, pass `type' to the client that requested it,
-  // by calling its call back function (or queuing it on the Busy Interface).
+  Request(callback_type&& callback, BusyInterface* busy_interface = nullptr) :
+      m_count(0), m_state(0), m_busy_interface(busy_interface), m_callback(std::move(callback)) { Dout(dc::notice, "Constructing Request [" << this << "]"); }
+  ~Request() { Dout(dc::notice, "Destructing Request [" << this << "]"); }
   bool handle(TYPE const& type);
-
-  // Called when the request was queued and the client becomes unbusy.
   void rehandle(TYPE const& type);
-
- public:
-  // Constructed by the event Server when a Client requests to be notified about its event.
-  Request(ClientTracker* client_tracker, typename Types<TYPE>::callback callback) :
-      m_client_tracker(client_tracker), m_callback(callback), m_busy_interface(nullptr) { client_tracker->copied(); }
-
-  // Constructed by the event Server when a Client requests to be notified about its event.
-  Request(ClientTracker* client_tracker, typename Types<TYPE>::callback callback, BusyInterface& busy_interface) :
-      m_client_tracker(client_tracker), m_callback(callback), m_busy_interface(&busy_interface) { client_tracker->copied(); }
-
-  // You shouldn't use this.
-  Request(Request const&) = delete;
-
-  bool canceled() const { return m_client_tracker->all_requests_canceled(); }
-
- protected:
-  // Destructor.
-  virtual ~Request() { m_client_tracker->release(); }
+  void operator delete(void* ptr) { utils::NodeMemoryPool::static_free(ptr); }
 };
+
+inline void BusyInterface::unset_busy()
+{
+  DoutEntering(dc::notice, "BusyInterface::unset_busy() [" << (void*)this << "]");
+  if (m_busy_depth == 1 && !m_events.empty())
+    flush_events();
+#ifdef CWDEBUG
+  if (m_busy_depth == 0)
+    DoutFatal(dc::core, "Calling unset_busy() more often than set_busy()");
+#endif
+  --m_busy_depth;
+}
+
+template<class TYPE>
+void BusyInterface::queue(Request<TYPE>* request, TYPE const& type)
+{
+  QueuedEvent<TYPE>* queued_event = new QueuedEvent<TYPE>(request, type);
+  AllocTag1(queued_event);
+  m_events.push_back(queued_event);
+}
 
 template<class TYPE>
 bool Request<TYPE>::handle(TYPE const& type)
 {
-  if (m_client_tracker->all_requests_canceled())
-    return true;
-  if (!m_busy_interface)
-    m_callback(type);
-  else if (m_busy_interface->is_busy())
-    m_busy_interface->queue(this, type);
-  else
+  DoutEntering(dc::notice, "Request<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::handle() with ref count = " << m_count << " and state = " << m_state);
+
+  // This function is (only) called from Server::trigger because it was found in Server<TYPE>::m_requests.
+  // Hence the ref count is at LEAST 1. While we're here that could go down from (say) 2 to 1, but if
+  // it reaches 1 then it can never go up again: nobody can make copies of the boost::intrusive_ptr in
+  // Server<TYPE>::m_requests. Therefore, if m_count becomes 1 then it is guaranteed that it will stay 1.
+  //
+  // However if m_count is larger than 1 then we will call m_callback(type), so we have to stop other
+  // threads from destroying objects (including whatever m_busy_interface is pointing at) that are
+  // needed for that to be allowed. The only mechanism that we have is that the user should guarantee
+  // that they will destroy the last boost::intrusive_ptr to this object before destroying the busy
+  // interface (if any) or any object that is needed for the callback.
+  //
+  // Therefore, the only way to stop a thread from destroying those objects is by blocking a thread that
+  // tries to make the ref count unique after we checked for its uniqueness here.
+  //
+  // This is done with the m_state.
+
+  if (!(m_state.fetch_add(2) & 1))
   {
-    m_busy_interface->set_busy();
-    m_callback(type);
-    m_busy_interface->unset_busy();
+
+    // At this point m_count can already be 1, in which case we'll just return.
+    // It could also be 2 and be decreased to 1 by another thread (which after that would block
+    // until we unlock m_unique_mutex), in which case we'd also return.
+
+    if (std::atomic_load_explicit(&m_count, std::memory_order_relaxed) == 1)      // Is the server the only one left with a reference to this request?
+      goto request_handled;             // Delete request.
+
+    // This means that m_count wasn't already 1. It can still become 1 right here (or below),
+    // but the thread doing so would block until we leave this scope (aka, until we called
+    // m_callback(type) and returned from it. Note that normally a thread that destroys the
+    // callback object should first set a flag causing the callback to immediately return,
+    // before attempting to destroy it. So, it won't be blocked for any significant amount
+    // of time.
+
+    BusyInterface* bi = m_busy_interface;
+    if (TYPE::one_shot)
+    {
+      // Make sure that there is a balance between the number of calls to request() and the number of calls to m_callback().
+      if (bi == s_handled)
+        goto request_handled;
+      m_busy_interface = s_handled;     // Only one callback per Request object please.
+    }
+
+    // If there is no busy interface, just do the call back.
+    if (!bi)
+    {
+      m_callback(type);
+      m_state.fetch_sub(2);
+      return false;                     // Keep request when it isn't one_shot.
+    }
+
+    // Otherwise mark busy interface as busy and do the callback when it wasn't already busy, otherwise queue the event.
+    if (bi->set_busy())
+      m_callback(type);
+    else
+      bi->queue(this, type);
+
+    // Now that we did some work, lets check again if there is another thread that is possibly blocking
+    // and about to destruct everything. If so, just leave and delete the request.
+    if (std::atomic_load_explicit(&m_count, std::memory_order_relaxed) == 1)
+      goto request_handled;             // Abort.
+
+    bi->unset_busy();
   }
-  return false;
+
+request_handled:
+  m_state.fetch_sub(2);
+  return true;                          // Keep request when it isn't one_shot.
 }
 
 template<class TYPE>
@@ -221,135 +300,82 @@ void Request<TYPE>::rehandle(TYPE const& type)
   m_callback(type);
 }
 
-//-----------------------------------------------------------------------------
-//
-// Implementation of the inline methods of busy_interface_ct.
-//
-
-inline void BusyInterface::unset_busy()
-{
-  if (m_busy_depth == 1 && !m_events.empty())
-    flush_events();
-#ifdef CWDEBUG
-  if (m_busy_depth == 0)
-    DoutFatal(dc::core, "Calling unset_busy() more often than set_busy()");
-#endif
-  --m_busy_depth;
-}
-
-template<class TYPE>
-inline void BusyInterface::queue(typename Types<TYPE>::request_ptr request, TYPE const& type)
-{
-  QueuedEvent<TYPE>* queued_event = new QueuedEvent<TYPE>(request, type);
-  AllocTag1(queued_event);
-  m_events.push_back(queued_event);
-}
-
-//=================================================================================
-//
-// Client
-//
-
-class Client
-{
- private:
-  ClientTracker* m_client_tracker;
-  Client* m_the_real_me;
-
- public:
-  Client() : m_the_real_me(nullptr) { m_client_tracker = NEW(ClientTracker(this)); }
-  Client(Client const& client) : m_client_tracker(client.m_client_tracker), m_the_real_me(nullptr) { client.m_client_tracker->copied(); }
-  void operator=(Client&& client) { ASSERT(!client.m_the_real_me); m_client_tracker = client.m_client_tracker; client.m_client_tracker = nullptr; }
-#ifdef CWDEBUG
-  ~Client()
-  {
-    if (m_client_tracker)
-      DoutFatal(dc::core, "You should call 'cancel_all_requests()' from the destructor of the most-derived object.");
-  }
-#endif
-  // Call this when the event client is destructed (from the most derived object).
-  void cancel_all_requests()
-  {
-    if (m_client_tracker)
-    {
-      if (m_the_real_me == this)
-        m_client_tracker->cancel_all_requests();
-      m_client_tracker->release();
-      m_client_tracker = nullptr;
-    }
-  }
-
-  void lock()
-  {
-    ASSERT(!m_the_real_me || m_the_real_me == this);
-    m_the_real_me = this;
-    m_client_tracker->set_client(this);
-  }
-
-  ClientTracker* client_tracker() const { return m_client_tracker; }
-};
-
-template<int number_of_busy_interfaces = 1>
-class BusyClient : public Client
-{
-  using Client::Client;
-
- private:
-  std::array<BusyInterface, number_of_busy_interfaces> m_busy_interfaces;
-
- public:
-  BusyInterface& busy_interface(int n) { return m_busy_interfaces[n]; }
-
-  void set_busy(int n = 0) { m_busy_interfaces[n].set_busy(); }
-  void unset_busy(int n = 0) { m_busy_interfaces[n].unset_busy(); }
-};
-
-//=================================================================================
-//
-// Server
-//
-
 template<class TYPE>
 class Server
 {
-  using request_ptr = typename Types<TYPE>::request_ptr;
-  using requests_type = std::vector<request_ptr>;
-
- private:
-  requests_type m_requests;
-
- protected:
-  void add_request(request_ptr request) { m_requests.push_back(request); }
+  using request_ptr_type = typename Types<TYPE>::request_ptr;
+  std::vector<request_ptr_type> m_requests;
+  utils::NodeMemoryPool m_request_pool;
 
  public:
-  // Add callback request.
-  void operator()(Client const& client, typename Types<TYPE>::callback callback)
+  Server() : m_request_pool(64, sizeof(Request<TYPE>)) { }
+
+  // Passing directly a std::function.
+  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(std::function<void(TYPE const&)>&& callback)
   {
-    add_request(NEW(Request<TYPE>(client.client_tracker(), callback)));
+    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::move(callback)));
   }
 
-  template<int number_of_busy_interfaces>
-  void operator()(BusyClient<number_of_busy_interfaces>& client, typename Types<TYPE>::callback callback, int n = 0)
+  // Passing directly a std::function and busy interface.
+  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(std::function<void(TYPE const&)>&& callback, BusyInterface& busy_interface)
   {
-    ASSERT(0 <= n && n < number_of_busy_interfaces);
-    add_request(NEW(Request<TYPE>(client.client_tracker(), callback, client.busy_interface(n))));
+    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::move(callback), &busy_interface));
+  }
+
+  // Non-const client.
+  template<class CLIENT, typename... Args>
+  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(CLIENT& client, void (CLIENT::*cb)(TYPE const&, Args...), Args... args)
+  {
+    Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << "&, " << libcwd::type_info_of(cb).demangled_name() << ", ...)");
+    using namespace std::placeholders;
+    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::bind(cb, &client, _1, args...)));
+  }
+
+  template<class CLIENT, typename... Args>
+  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(CLIENT& client, void (CLIENT::*cb)(TYPE const&, Args...), BusyInterface& busy_interface, Args... args)
+  {
+    Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << "&, " << libcwd::type_info_of(cb).demangled_name() << ", BusyInterface& [" << (void*)&busy_interface << "], ...)");
+    using namespace std::placeholders;
+    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::bind(cb, &client, _1, args...), &busy_interface));
+  }
+
+  // Const client.
+  //
+  // A callback to a const client seems not practical: isn't the idea of an event
+  // call back that some action has to be taken; the client likely needs to remember
+  // that the event happened. Nevertheless in unforeseen cases one might want to
+  // call a const member function, for which the above template argument deduction
+  // will fail. And when adding a function that accepts a const member function
+  // there is no need any more that client is non-const either.
+  template<class CLIENT, typename... Args>
+  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(CLIENT const& client, void (CLIENT::*cb)(TYPE const&, Args...) const, Args... args)
+  {
+    Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << " const&, " << libcwd::type_info_of(cb).demangled_name() << ", ...)");
+    using namespace std::placeholders;
+    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::bind(cb, &client, _1, args...)));
   }
 
   void trigger(TYPE const& type);
 };
 
-//-----------------------------------------------------------------------------
-//
-// Implementation of methods of Server.
-//
-
 template<class TYPE>
 void Server<TYPE>::trigger(TYPE const& type)
 {
-  for (auto&& request : m_requests)
-    request->handle(type);
+  DoutEntering(dc::notice, "event::Server<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::trigger(" << type << ")");
   if (TYPE::one_shot)
+  {
+    for (auto& request : m_requests)
+      request->handle(type);
     m_requests.clear();
+  }
+  else
+    m_requests.erase(
+        std::remove_if(m_requests.begin(),
+                       m_requests.end(),
+                       [&type](request_ptr_type const& request)
+                       { return request->handle(type); }
+                      ),
+        m_requests.end());
 }
 
 } // namespace event
