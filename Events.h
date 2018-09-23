@@ -148,34 +148,57 @@ template<class TYPE>
 class Request
 {
  private:
-  std::atomic_int m_count;      // Reference counter for this object.
-  std::atomic_int m_state;      // If the least signficant bit is set then the requester is
-                                // about to be destroyed and the request should just be ignored.
-                                // If the value is greater than 0 then at least one thread
-                                // is inside handle() and the requester may not destruct (see intrusive_ptr_release below).
-                                // If the value is less than 0 then the requester left intrusive_ptr_release
-                                // and might destruct everything at any moment; therefore in that
-                                // case we may no longer use m_busy_interface or m_callback.
+  static constexpr int destructing = 0x1;                               // If this bit is set in m_count then m_busy_interface and m_callback are about to be invalidated.
+                                                                        // Calls to handle() must return immediately in that case in order to avoid unnecessary stalling
+                                                                        // in intrusive_ptr_release.
+
+  static constexpr int handle_count_shift = 1;                          // The handle count starts at the next bit.
+  static constexpr int handle_count_unit = 1 << handle_count_shift;     // The next ref_count_shift - handle_count_shift bits are used to count the number of threads
+                                                                        // inside handle().
+  static constexpr int ref_count_shift = 16;
+  static constexpr int ref_count_unit = 1 << ref_count_shift;           // The remaining bits are used as reference counter of this object.
+
+  static constexpr int destructing_unique = ref_count_unit | destructing;
+
+  std::atomic_int m_state;
+
+  // If the least signficant bit is set then the requester is
+  // about to be destroyed and the request should just be ignored.
+  static bool is_destructing(int state) { return state & handle_count_shift; }
+  static bool is_unique(int state) { return state >> ref_count_shift == 1; }
+  static int ref_count(int state) { return state >> ref_count_shift; }
 
  public:
   friend void intrusive_ptr_add_ref(Request* ptr)
   {
-    ptr->m_count.fetch_add(1, std::memory_order_relaxed);
+    ptr->m_state.fetch_add(ref_count_unit, std::memory_order_relaxed);
   }
 
   friend void intrusive_ptr_release(Request* ptr)
   {
-    int old_count = ptr->m_count.fetch_sub(1, std::memory_order_release);
-    if (old_count == 2)                                 // In this case the calling thread is about to destruct the object(s) that are needed for the callback.
+    int prev_state = ptr->m_state.fetch_sub(ref_count_unit, std::memory_order_release);
+    int new_ref_count = ref_count(prev_state) - 1;
+    if (new_ref_count == 1)             // In this case the calling thread is about to destruct the object(s) that are needed for the callback.
     {
       // Mark that m_busy_interface and the objects needed m_callback are about to be invalidated by setting the least significant bit.
-      ptr->m_state.fetch_sub(1);
+      ptr->m_state.fetch_or(destructing);
       // Wait with leaving this function (and thus invalidating anything) until all threads left handle().
-      while (ptr->m_state != -1)
+      int count = 0;
+      while (ptr->m_state != destructing_unique)
+      {
+        if (++count >= 200)
+        {
+          Dout(dc::warning(count % 200 == 0), "event::intrusive_ptr_release(" << type_info_of(ptr).demangled_name() << ") is hanging!");
+          // Are you causing this event to happen from within the callback of such event? That is not possible for non-one-shot events!
+          ASSERT(count < 1000);
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
         std::this_thread::yield();
+      }
     }
-    if (old_count == 1)                                 // The last reference was just removed from Server<TYPE>::m_requests.
+    else if (new_ref_count == 0)        // The last reference was just removed from Server<TYPE>::m_requests.
     {
+      ASSERT(ptr->m_state == destructing);
       std::atomic_thread_fence(std::memory_order_acquire);
       delete ptr;
     }
@@ -189,7 +212,7 @@ class Request
 
  public:
   Request(callback_type&& callback, BusyInterface* busy_interface = nullptr) :
-      m_count(0), m_state(0), m_busy_interface(busy_interface), m_callback(std::move(callback)) { Dout(dc::notice, "Constructing Request [" << this << "]"); }
+      m_state(0), m_busy_interface(busy_interface), m_callback(std::move(callback)) { Dout(dc::notice, "Constructing Request [" << this << "]"); }
   ~Request() { Dout(dc::notice, "Destructing Request [" << this << "]"); }
   bool handle(TYPE const& type);
   void rehandle(TYPE const& type);
@@ -219,47 +242,28 @@ void BusyInterface::queue(Request<TYPE>* request, TYPE const& type)
 template<class TYPE>
 bool Request<TYPE>::handle(TYPE const& type)
 {
-  DoutEntering(dc::notice, "Request<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::handle() with ref count = " << m_count << " and state = " << m_state);
+  DoutEntering(dc::notice, "Request<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::handle() with state = " << std::hex << m_state);
 
-  // This function is (only) called from Server::trigger because it was found in Server<TYPE>::m_requests.
-  // Hence the ref count is at LEAST 1. While we're here that could go down from (say) 2 to 1, but if
-  // it reaches 1 then it can never go up again: nobody can make copies of the boost::intrusive_ptr in
-  // Server<TYPE>::m_requests. Therefore, if m_count becomes 1 then it is guaranteed that it will stay 1.
-  //
-  // However if m_count is larger than 1 then we will call m_callback(type), so we have to stop other
-  // threads from destroying objects (including whatever m_busy_interface is pointing at) that are
-  // needed for that to be allowed. The only mechanism that we have is that the user should guarantee
-  // that they will destroy the last boost::intrusive_ptr to this object before destroying the busy
-  // interface (if any) or any object that is needed for the callback.
-  //
-  // Therefore, the only way to stop a thread from destroying those objects is by blocking a thread that
-  // tries to make the ref count unique after we checked for its uniqueness here.
-  //
-  // This is done with the m_state.
-
-  if (!(m_state.fetch_add(2) & 1))
+  struct SafeHandleCounter
   {
+    std::atomic_int& m_state;
+    int m_prev_state;
+    SafeHandleCounter(std::atomic_int& state) : m_state(state), m_prev_state(m_state.fetch_add(handle_count_unit)) { }
+    ~SafeHandleCounter() { m_state.fetch_sub(handle_count_unit); }
+    operator int() const { return m_prev_state; }
+  };
 
-    // At this point m_count can already be 1, in which case we'll just return.
-    // It could also be 2 and be decreased to 1 by another thread (which after that would block
-    // until we unlock m_unique_mutex), in which case we'd also return.
+  // Increment m_state within this scope and remember the previous state.
+  SafeHandleCounter prev_state(m_state);
 
-    if (std::atomic_load_explicit(&m_count, std::memory_order_relaxed) == 1)      // Is the server the only one left with a reference to this request?
-      goto request_handled;             // Delete request.
-
-    // This means that m_count wasn't already 1. It can still become 1 right here (or below),
-    // but the thread doing so would block until we leave this scope (aka, until we called
-    // m_callback(type) and returned from it. Note that normally a thread that destroys the
-    // callback object should first set a flag causing the callback to immediately return,
-    // before attempting to destroy it. So, it won't be blocked for any significant amount
-    // of time.
-
+  if (!is_destructing(prev_state) && !is_unique(prev_state))
+  {
     BusyInterface* bi = m_busy_interface;
     if (TYPE::one_shot)
     {
       // Make sure that there is a balance between the number of calls to request() and the number of calls to m_callback().
       if (bi == s_handled)
-        goto request_handled;
+        return true;
       m_busy_interface = s_handled;     // Only one callback per Request object please.
     }
 
@@ -267,7 +271,6 @@ bool Request<TYPE>::handle(TYPE const& type)
     if (!bi)
     {
       m_callback(type);
-      m_state.fetch_sub(2);
       return false;                     // Keep request when it isn't one_shot.
     }
 
@@ -279,14 +282,11 @@ bool Request<TYPE>::handle(TYPE const& type)
 
     // Now that we did some work, lets check again if there is another thread that is possibly blocking
     // and about to destruct everything. If so, just leave and delete the request.
-    if (std::atomic_load_explicit(&m_count, std::memory_order_relaxed) == 1)
-      goto request_handled;             // Abort.
+    if (is_destructing(std::atomic_load_explicit(&m_state, std::memory_order_relaxed)))
+      return true;                      // Abort.
 
     bi->unset_busy();
   }
-
-request_handled:
-  m_state.fetch_sub(2);
   return true;                          // Keep request when it isn't one_shot.
 }
 

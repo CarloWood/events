@@ -24,6 +24,16 @@ struct Cookie { };
 
 event::Server<FooType> server;
 
+void do_trigger()
+{
+  static int count;
+  if (++count == 4)
+    return;
+  Debug(NAMESPACE_DEBUG::init_thread());
+  FooType type(21);
+  server.trigger(type);
+}
+
 class Foo
 {
   int m_magic;
@@ -35,7 +45,9 @@ class Foo
   {
     DoutEntering(dc::notice, "Foo::foo(" << type << ", " << n << ")");
     ASSERT(m_magic == 12345678);
-    server.trigger(type);
+    std::thread t(do_trigger);
+    t.detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
   void request(void (Foo::*callback)(FooType const&, Cookie, int), Cookie cookie, int n)
