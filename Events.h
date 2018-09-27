@@ -60,6 +60,7 @@
 #include "debug.h"
 #include "utils/AIRefCount.h"
 #include "utils/NodeMemoryPool.h"
+#include "utils/macros.h"
 #include <deque>
 #include <functional>
 #include <array>
@@ -88,12 +89,12 @@ class Request;
 class BusyInterface
 {
  private:
-  void flush_events();          // Flush all queued events until the list is empty or the client is marked busy again.
-                                // The latter can happen when one of the call back functions calls `is_busy()' for this interface.
+  void pop_event();     // Flush all queued events until the list is empty or the client is marked busy again.
+                        // The latter can happen when one of the call back functions calls `is_busy()' for this interface.
 
   class QueuedEventBase
   {
-    friend void BusyInterface::flush_events();
+    friend void BusyInterface::pop_event();
     virtual void retrigger() = 0;
   };
 
@@ -137,8 +138,16 @@ class BusyInterface
     return m_busy_depth.fetch_add(1) == 0;
   }
 
-  // Decrement busy depth counter and flush all queued events, if any, when the interface becomes not busy.
-  void unset_busy();
+  // W.I.P.
+  bool unset_busy()
+  {
+    DoutEntering(dc::notice, "BusyInterface::unset_busy() [" << (void*)this << "]");
+    // Obviously a thread should only call unset_busy() after first calling set_busy().
+    // Hence, it should be impossible that m_busy_depth is zero here.
+    ASSERT(m_busy_depth > 0);
+    return m_busy_depth.fetch_sub(1) == 1;
+  }
+
 };
 
 extern BusyInterface dummy_busy_interface;      // Just to have some address of type BusyInterface*.
@@ -164,9 +173,25 @@ class Request
 
   // If the least signficant bit is set then the requester is
   // about to be destroyed and the request should just be ignored.
-  static bool is_destructing(int state) { return state & handle_count_shift; }
+  static bool is_destructing(int state) { return state & destructing; }
   static bool is_unique(int state) { return state >> ref_count_shift == 1; }
   static int ref_count(int state) { return state >> ref_count_shift; }
+
+  struct QueueGuard
+  {
+    bool need_pop_front;
+    Request<TYPE>* self;
+    QueueGuard(Request<TYPE>* self_) : need_pop_front(false), self(self_) { }
+    ~QueueGuard() { pop_front(); }
+    void pop_front()
+    {
+      if (AI_UNLIKELY(need_pop_front))
+      {
+        std::lock_guard<std::mutex> lock(self->m_events_mutex);
+        self->m_events.pop_front();
+      }
+    }
+  };
 
  public:
   friend void intrusive_ptr_add_ref(Request* ptr)
@@ -184,7 +209,7 @@ class Request
       ptr->m_state.fetch_or(destructing);
       // Wait with leaving this function (and thus invalidating anything) until all threads left handle().
       int count = 0;
-      while (ptr->m_state != destructing_unique)
+      while (ptr->m_state != destructing_unique)        // This loops until handle_count == 0.
       {
         if (++count >= 200)
         {
@@ -219,18 +244,6 @@ class Request
   void operator delete(void* ptr) { utils::NodeMemoryPool::static_free(ptr); }
 };
 
-inline void BusyInterface::unset_busy()
-{
-  DoutEntering(dc::notice, "BusyInterface::unset_busy() [" << (void*)this << "]");
-  if (m_busy_depth == 1 && !m_events.empty())
-    flush_events();
-#ifdef CWDEBUG
-  if (m_busy_depth == 0)
-    DoutFatal(dc::core, "Calling unset_busy() more often than set_busy()");
-#endif
-  --m_busy_depth;
-}
-
 template<class TYPE>
 void BusyInterface::queue(Request<TYPE>* request, TYPE const& type)
 {
@@ -256,6 +269,9 @@ bool Request<TYPE>::handle(TYPE const& type)
   // Increment m_state within this scope and remember the previous state.
   SafeHandleCounter prev_state(m_state);
 
+  // Do nothing when the busy interface and/or the object(s) that are needed for m_callback to remain valid are about to be destructed
+  // and/or the Server object is the only object that still has a reference to this Request object (which means the request was
+  // cancelled).
   if (!is_destructing(prev_state) && !is_unique(prev_state))
   {
     BusyInterface* bi = m_busy_interface;
@@ -270,21 +286,27 @@ bool Request<TYPE>::handle(TYPE const& type)
     // If there is no busy interface, just do the call back.
     if (!bi)
     {
-      m_callback(type);
+      m_callback(type);                 // Multiple threads might call this concurrently.
       return false;                     // Keep request when it isn't one_shot.
     }
 
     // Otherwise mark busy interface as busy and do the callback when it wasn't already busy, otherwise queue the event.
     if (bi->set_busy())
-      m_callback(type);
+      m_callback(type);                 // One one thread at a time will call this.
     else
       bi->queue(this, type);
 
     // Now that we did some work, lets check again if there is another thread that is possibly blocking
-    // and about to destruct everything. If so, just leave and delete the request.
+    // and about to destruct everything. If so, just leave and delete the request. In that case we leave
+    // the busy interface marked as 'busy', but that shouldn't have any negative effect since we should
+    // nobody should be using the busy interface anymore as soon as the last thread exits this block;
+    // hence the only possible effect is that another thread won't call pop_event() below while otherwise
+    // it would have. This is actually a good thing.
     if (is_destructing(std::atomic_load_explicit(&m_state, std::memory_order_relaxed)))
       return true;                      // Abort.
 
+    // Process queued events.
+    // TODO: W.I.P.
     bi->unset_busy();
   }
   return true;                          // Keep request when it isn't one_shot.

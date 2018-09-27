@@ -56,8 +56,8 @@ class MyEventClient1
 {
   int m_magic;
   event::BusyInterface m_bi[2];        // 0 = foo, 1 = bar.
-  event::Types<FooEventType>::request_ptr m_foo_request_handle;
-  event::Types<BarEventType>::request_ptr m_bar_request_handle;
+  event::request_handle<FooEventType> m_foo_request_handle;
+  event::request_handle<BarEventType> m_bar_request_handle;
  public:
   void handle_foo(FooEventType const& data)
   {
@@ -80,7 +80,7 @@ using Cookie = int;
 class MyEventClient2
 {
   int m_magic;
-  event::Types<FooEventType>::request_ptr m_request_handle;
+  event::request_handle<FooEventType> m_request_handle;
  public:
   void handle_foo(FooEventType const& data, Cookie cookie)
   {

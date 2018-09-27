@@ -31,7 +31,7 @@ void my_callback(MyEventType const& event)
 
 struct Foo
 {
-  event::Types<MyEventType>::request_ptr m_request_handle;
+  event::request_handle<MyEventType> m_request_handle;
 
   void callback(MyEventType const& event) const
   {

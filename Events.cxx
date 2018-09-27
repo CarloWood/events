@@ -4,6 +4,7 @@
 
 namespace event {
 
+#if 0 // TODO: W.I.P.
 void BusyInterface::flush_events()
 {
 #ifdef CWDEBUG
@@ -17,6 +18,7 @@ void BusyInterface::flush_events()
   }
   while (m_busy_depth == 1 && !m_events.empty());
 }
+#endif
 
 BusyInterface dummy_busy_interface;
 
