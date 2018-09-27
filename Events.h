@@ -77,11 +77,12 @@ template<class TYPE>
 struct Types
 {
   using request = Request<TYPE>;
-  using request_ptr = boost::intrusive_ptr<request>;
+  using request_strong_ptr = boost::intrusive_ptr<request>;
+  using request_weak_ptr = boost::intrusive_ptr<request>;
   using callback = std::function<void(TYPE const&)>;
 };
 
-template<class TYPE> using request_handle = typename Types<TYPE>::request_ptr;
+template<class TYPE> using request_handle = typename Types<TYPE>::request_strong_ptr;
 
 template<class TYPE>
 class Request;
@@ -108,9 +109,9 @@ class BusyInterface
   template<class TYPE>
   class QueuedEvent final : public QueuedEventBase
   {
-    using request_ptr_type = typename Types<TYPE>::request_ptr;
+    using request_weak_ptr_type = typename Types<TYPE>::request_weak_ptr;
    private:
-    request_ptr_type m_request;
+    request_weak_ptr_type m_request;
     TYPE const m_type;
    private:
     friend void BusyInterface::queue<TYPE>(Request<TYPE>*, TYPE const&);
@@ -325,8 +326,8 @@ void Request<TYPE>::rehandle(TYPE const& type)
 template<class TYPE>
 class Server
 {
-  using request_ptr_type = typename Types<TYPE>::request_ptr;
-  std::vector<request_ptr_type> m_requests;
+  using request_weak_ptr_type = typename Types<TYPE>::request_weak_ptr;
+  std::vector<request_weak_ptr_type> m_requests;
   utils::NodeMemoryPool m_request_pool;
 
  public:
@@ -394,7 +395,7 @@ void Server<TYPE>::trigger(TYPE const& type)
     m_requests.erase(
         std::remove_if(m_requests.begin(),
                        m_requests.end(),
-                       [&type](request_ptr_type const& request)
+                       [&type](request_weak_ptr_type const& request)
                        { return request->handle(type); }
                       ),
         m_requests.end());
