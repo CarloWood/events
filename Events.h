@@ -79,7 +79,7 @@ struct Types
 {
   using request = Request<TYPE>;
   using request_strong_ptr = std::shared_ptr<request>;
-  using request_weak_ptr = std::shared_ptr<request>;
+  using request_weak_ptr = std::weak_ptr<request>;
   using callback = std::function<void(TYPE const&)>;
 };
 
@@ -104,7 +104,7 @@ class BusyInterface
   // Queue the event "request / type".
   // This event will be handled as soon as `unset_busy' is called while m_busy_depth is 1.
   template<class TYPE>
-  inline void queue(Request<TYPE>* request, TYPE const& type);
+  inline void queue(typename Types<TYPE>::request_weak_ptr& request_weak, TYPE const& type);
 
  private:
   template<class TYPE>
@@ -112,13 +112,18 @@ class BusyInterface
   {
     using request_weak_ptr_type = typename Types<TYPE>::request_weak_ptr;
    private:
-    request_weak_ptr_type m_request;
+    request_weak_ptr_type m_request_weak;
     TYPE const m_type;
    private:
-    friend void BusyInterface::queue<TYPE>(Request<TYPE>*, TYPE const&);
-    QueuedEvent(Request<TYPE>* request, TYPE const& type) : m_request(request), m_type(type) { }
+    friend void BusyInterface::queue<TYPE>(typename Types<TYPE>::request_weak_ptr&, TYPE const&);
+    QueuedEvent(request_weak_ptr_type& request_weak, TYPE const& type) : m_request_weak(request_weak), m_type(type) { }
    private:
-    void retrigger() override { m_request->rehandle(m_type); delete this; }
+    void retrigger() override
+    {
+      if (auto request = m_request_weak.lock())
+        request->rehandle(m_type);
+      delete this;
+    }
   };
 
  private:
@@ -158,6 +163,8 @@ static constexpr BusyInterface* const s_handled = &dummy_busy_interface;
 template<class TYPE>
 class Request
 {
+  using request_weak_ptr_type = typename Types<TYPE>::request_weak_ptr;
+
  private:
   static constexpr int destructing = 0x1;                               // If this bit is set in m_count then m_busy_interface and m_callback are about to be invalidated.
                                                                         // Calls to handle() must return immediately in that case in order to avoid unnecessary stalling
@@ -241,21 +248,21 @@ class Request
   Request(callback_type&& callback, BusyInterface* busy_interface = nullptr) :
       m_state(0), m_busy_interface(busy_interface), m_callback(std::move(callback)) { Dout(dc::notice, "Constructing Request [" << this << "]"); }
   ~Request() { Dout(dc::notice, "Destructing Request [" << this << "]"); }
-  bool handle(TYPE const& type);
+  bool handle(request_weak_ptr_type& request_weak, TYPE const& type);
   void rehandle(TYPE const& type);
   void operator delete(void* ptr) { utils::NodeMemoryPool::static_free(ptr); }
 };
 
 template<class TYPE>
-void BusyInterface::queue(Request<TYPE>* request, TYPE const& type)
+void BusyInterface::queue(typename Types<TYPE>::request_weak_ptr& request_weak, TYPE const& type)
 {
-  QueuedEvent<TYPE>* queued_event = new QueuedEvent<TYPE>(request, type);
+  QueuedEvent<TYPE>* queued_event = new QueuedEvent<TYPE>(request_weak, type);
   AllocTag1(queued_event);
   m_events.push_back(queued_event);
 }
 
 template<class TYPE>
-bool Request<TYPE>::handle(TYPE const& type)
+bool Request<TYPE>::handle(request_weak_ptr_type& request_weak, TYPE const& type)
 {
   DoutEntering(dc::notice, "Request<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::handle() with state = " << std::hex << m_state);
 
@@ -296,7 +303,7 @@ bool Request<TYPE>::handle(TYPE const& type)
     if (bi->set_busy())
       m_callback(type);                 // One one thread at a time will call this.
     else
-      bi->queue(this, type);
+      bi->queue(request_weak, type);
 
     // Now that we did some work, lets check again if there is another thread that is possibly blocking
     // and about to destruct everything. If so, just leave and delete the request. In that case we leave
@@ -423,16 +430,22 @@ void Server<TYPE>::trigger(TYPE const& type)
   typename requests_ts::wat requests_w(m_requests);
   if (TYPE::one_shot)
   {
-    for (auto& request : *requests_w)
-      request->handle(type);
+    for (auto& request_weak : *requests_w)
+    {
+      if (auto request = request_weak.lock())
+        request->handle(request_weak, type);
+    }
     requests_w->clear();
   }
   else
     requests_w->erase(
         std::remove_if(requests_w->begin(),
                        requests_w->end(),
-                       [&type](request_weak_ptr_type const& request)
-                       { return request->handle(type); }
+                       [&type](request_weak_ptr_type& request_weak)
+                       {
+                         auto request = request_weak.lock();
+                         return request ? request->handle(request_weak, type) : true;
+                       }
                       ),
         requests_w->end());
 }
