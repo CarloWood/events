@@ -61,6 +61,7 @@
 #include "utils/AIRefCount.h"
 #include "utils/NodeMemoryPool.h"
 #include "utils/macros.h"
+#include "threadsafe/aithreadsafe.h"
 #include <deque>
 #include <functional>
 #include <array>
@@ -77,8 +78,8 @@ template<class TYPE>
 struct Types
 {
   using request = Request<TYPE>;
-  using request_strong_ptr = boost::intrusive_ptr<request>;
-  using request_weak_ptr = boost::intrusive_ptr<request>;
+  using request_strong_ptr = std::shared_ptr<request>;
+  using request_weak_ptr = std::shared_ptr<request>;
   using callback = std::function<void(TYPE const&)>;
 };
 
@@ -327,39 +328,67 @@ template<class TYPE>
 class Server
 {
   using request_weak_ptr_type = typename Types<TYPE>::request_weak_ptr;
-  std::vector<request_weak_ptr_type> m_requests;
-  utils::NodeMemoryPool m_request_pool;
+  using requests_ts = aithreadsafe::Wrapper<std::vector<request_weak_ptr_type>, aithreadsafe::policy::Primitive<std::mutex>>;
+  requests_ts m_requests;
+  using request_handle_memory_pool_ts = aithreadsafe::Wrapper<utils::NodeMemoryPool, aithreadsafe::policy::Primitive<std::mutex>>;
+  request_handle_memory_pool_ts m_request_handle_memory_pool;
 
  public:
-  Server() : m_request_pool(64, sizeof(Request<TYPE>)) { }
+  Server() : m_request_handle_memory_pool(64) { }
 
   // Passing directly a std::function.
-  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(std::function<void(TYPE const&)>&& callback)
+  [[nodiscard]] request_handle<TYPE> request(std::function<void(TYPE const&)>&& callback)
   {
-    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::move(callback)));
+    Dout(dc::notice, "Calling Server::request(std::function<void(" << libcwd::type_info_of<TYPE>().demangled_name() << " const&)>&&)");
+    request_handle<TYPE> handle =
+        std::allocate_shared<Request<TYPE>>(
+            utils::Allocator<Request<TYPE>, utils::NodeMemoryPool>(*request_handle_memory_pool_ts::wat(m_request_handle_memory_pool)),
+            std::move(callback)
+        );
+    typename requests_ts::wat(m_requests)->push_back(handle);
+    return handle;
   }
 
   // Passing directly a std::function and busy interface.
-  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(std::function<void(TYPE const&)>&& callback, BusyInterface& busy_interface)
+  [[nodiscard]] request_handle<TYPE> request(std::function<void(TYPE const&)>&& callback, BusyInterface& busy_interface)
   {
-    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::move(callback), &busy_interface));
+    Dout(dc::notice, "Calling Server::request(std::function<void(" << libcwd::type_info_of<TYPE>().demangled_name() << " const&)>&&, BusyInterface& [" << (void*)&busy_interface << "])");
+    request_handle<TYPE> handle =
+        std::allocate_shared<Request<TYPE>>(
+            utils::Allocator<Request<TYPE>, utils::NodeMemoryPool>(*request_handle_memory_pool_ts::wat(m_request_handle_memory_pool)),
+            std::move(callback), &busy_interface
+        );
+    typename requests_ts::wat(m_requests)->push_back(handle);
+    return handle;
   }
 
   // Non-const client.
   template<class CLIENT, typename... Args>
-  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(CLIENT& client, void (CLIENT::*cb)(TYPE const&, Args...), Args... args)
+  [[nodiscard]] request_handle<TYPE> request(CLIENT& client, void (CLIENT::*cb)(TYPE const&, Args...), Args... args)
   {
     Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << "&, " << libcwd::type_info_of(cb).demangled_name() << ", ...)");
     using namespace std::placeholders;
-    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::bind(cb, &client, _1, args...)));
+    request_handle<TYPE> handle =
+        std::allocate_shared<Request<TYPE>>(
+            utils::Allocator<Request<TYPE>, utils::NodeMemoryPool>(*request_handle_memory_pool_ts::wat(m_request_handle_memory_pool)),
+            std::bind(cb, &client, _1, args...)
+        );
+    typename requests_ts::wat(m_requests)->push_back(handle);
+    return handle;
   }
 
   template<class CLIENT, typename... Args>
-  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(CLIENT& client, void (CLIENT::*cb)(TYPE const&, Args...), BusyInterface& busy_interface, Args... args)
+  [[nodiscard]] request_handle<TYPE> request(CLIENT& client, void (CLIENT::*cb)(TYPE const&, Args...), BusyInterface& busy_interface, Args... args)
   {
     Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << "&, " << libcwd::type_info_of(cb).demangled_name() << ", BusyInterface& [" << (void*)&busy_interface << "], ...)");
     using namespace std::placeholders;
-    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::bind(cb, &client, _1, args...), &busy_interface));
+    request_handle<TYPE> handle =
+        std::allocate_shared<Request<TYPE>>(
+            utils::Allocator<Request<TYPE>, utils::NodeMemoryPool>(*request_handle_memory_pool_ts::wat(m_request_handle_memory_pool)),
+            std::bind(cb, &client, _1, args...), &busy_interface
+        );
+    typename requests_ts::wat(m_requests)->push_back(handle);
+    return handle;
   }
 
   // Const client.
@@ -371,11 +400,17 @@ class Server
   // will fail. And when adding a function that accepts a const member function
   // there is no need any more that client is non-const either.
   template<class CLIENT, typename... Args>
-  [[nodiscard]] boost::intrusive_ptr<Request<TYPE>>& request(CLIENT const& client, void (CLIENT::*cb)(TYPE const&, Args...) const, Args... args)
+  [[nodiscard]] request_handle<TYPE> request(CLIENT const& client, void (CLIENT::*cb)(TYPE const&, Args...) const, Args... args)
   {
     Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << " const&, " << libcwd::type_info_of(cb).demangled_name() << ", ...)");
     using namespace std::placeholders;
-    return m_requests.emplace_back(new (m_request_pool) Request<TYPE>(std::bind(cb, &client, _1, args...)));
+    request_handle<TYPE> handle =
+        std::allocate_shared<Request<TYPE>>(
+            utils::Allocator<Request<TYPE>, utils::NodeMemoryPool>(*request_handle_memory_pool_ts::wat(m_request_handle_memory_pool)),
+            std::bind(cb, &client, _1, args...)
+        );
+    typename requests_ts::wat(m_requests)->push_back(handle);
+    return handle;
   }
 
   void trigger(TYPE const& type);
@@ -385,20 +420,21 @@ template<class TYPE>
 void Server<TYPE>::trigger(TYPE const& type)
 {
   DoutEntering(dc::notice, "event::Server<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::trigger(" << type << ")");
+  typename requests_ts::wat requests_w(m_requests);
   if (TYPE::one_shot)
   {
-    for (auto& request : m_requests)
+    for (auto& request : *requests_w)
       request->handle(type);
-    m_requests.clear();
+    requests_w->clear();
   }
   else
-    m_requests.erase(
-        std::remove_if(m_requests.begin(),
-                       m_requests.end(),
+    requests_w->erase(
+        std::remove_if(requests_w->begin(),
+                       requests_w->end(),
                        [&type](request_weak_ptr_type const& request)
                        { return request->handle(type); }
                       ),
-        m_requests.end());
+        requests_w->end());
 }
 
 } // namespace event

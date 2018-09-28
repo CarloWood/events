@@ -38,7 +38,7 @@ class Foo
 {
   int m_magic;
   event::BusyInterface m_foo_bi;
-  boost::intrusive_ptr<event::Request<FooType>> m_handle;
+  event::request_handle<FooType> m_handle;
 
  public:
   void foo(FooType const& type, Cookie, int n)
@@ -67,7 +67,7 @@ int main()
   Foo foo;
   {
     // The request with cookie 222 is destructed before the event is triggered and should therefore never be called.
-    boost::intrusive_ptr<event::Request<FooType>> handle2 = server.request(foo, &Foo::foo, cookie, 222);
+    event::request_handle<FooType> handle2 = server.request(foo, &Foo::foo, cookie, 222);
     foo.request(&Foo::foo, cookie, 111);
   }
   FooType type(42);
