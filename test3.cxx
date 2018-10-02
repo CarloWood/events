@@ -17,7 +17,7 @@ class Data
 struct FooType : public Data
 {
   using Data::Data;
-  static bool constexpr one_shot = true;
+  static bool constexpr one_shot = false;
 };
 
 struct Cookie { };
@@ -41,12 +41,14 @@ class Foo
   event::request_handle<FooType> m_handle;
 
  public:
+  static std::thread s_trigger_thread;
+
   void foo(FooType const& type, Cookie, int n)
   {
     DoutEntering(dc::notice, "Foo::foo(" << type << ", " << n << ")");
     ASSERT(m_magic == 12345678);
     std::thread t(do_trigger);
-    t.detach();
+    t.swap(s_trigger_thread);
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
@@ -58,6 +60,8 @@ class Foo
   Foo() : m_magic(12345678) { }
   ~Foo() { m_handle.reset(); m_magic = 0; }
 };
+
+std::thread Foo::s_trigger_thread;
 
 int main()
 {
@@ -73,4 +77,6 @@ int main()
   FooType type(42);
   server.trigger(type);
   server.trigger(type);
+
+  Foo::s_trigger_thread.join();
 }
