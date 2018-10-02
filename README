@@ -184,24 +184,18 @@ responsible to catch that exception and then do one of two things:
 
   void handle(TYPE const* data, bool exception_recovery = false)
   {
-    if (AI_LIKELY(!exception_recovery))
-      goto normal_entry;
-    else if (data)
-      goto recover;
-    while (counter.fetch_sub(1) == 1)   // Are there any threads above us?
+    if (AI_UNLIKELY(exception_recovery))
     {
-      {
-        // Pop and callback sequence.
-        std::lock_guard<std::mutex> lock(m_events_mutex);
-        if (m_events.empty())
-          break;
-        data = m_events.front();
-        m_events.pop_front();
-      }
-  normal_entry:
+      if (data)
+        goto recover_from_exception_retry;
+      goto recover_from_exception_no_retry;
+    }
+
+    for (;;)
+    {
       if (m_busy_depth.fetch_add(1) == 0)
       {
-  recover:                              // Recover from an exception thrown by m_callback.
+  recover_from_exception_retry:
         // Non-blocking critical area.
         m_callback(*data);
       }
@@ -211,6 +205,19 @@ responsible to catch that exception and then do one of two things:
         std::lock_guard<std::mutex> lock(m_events_mutex);
         m_events.push_back(data);
       }
+
+  recover_from_exception_no_retry:
+      if (counter.fetch_sub(1) > 1)     // Are there any threads above us?
+        break;
+
+      {
+        // Pop and callback sequence.
+        std::lock_guard<std::mutex> lock(m_events_mutex);
+        if (m_events.empty())
+          break;
+        data = m_events.front();
+        m_events.pop_front();
+      }
     }
   }
 
@@ -219,7 +226,7 @@ responsible to catch that exception and then do one of two things:
   a copy of the TYPE when pushing it onto m_events.
 
   However, if it could be avoided to make a copy *after* that, that would
-  be nice; however that would mean we need to change the line
+  be nice; that would mean we need to change the line
 
       data = m_events.front();
 
@@ -229,38 +236,32 @@ responsible to catch that exception and then do one of two things:
 
   after which we can't do the pop_front() until we actually used this pointer
   and are done with it. On the other hand, we need to remember that we semi-
-  popped it or the next thread might get the same pointer. If you image that
+  popped it or the next thread might get the same pointer. If you imaging that
   the pop_front() is removed then actually there isn't a danger that another
   thread will call front() until we decrement counter (until then no other
   thread will enter the Pop and callback sequence); they *will* add new
   element to m_events though; so the reference returned by front() may not
   be invalidated by a push_back.
 
-  Hence, the pop_front() can simply be moved to the end of the while() loop,
-  provided we only execute it for threads that entered from the top (as opposed
-  to entering through one of the labels):
+  Hence, the pop_front() can simply be moved to after where *data was used
+  provided we only execute it for threads that read data from the queue
+  by looping around.
 
   void handle(TYPE const* data, bool exception_recovery = false)
   {
     bool need_pop_front = false;
-    if (AI_LIKELY(!exception_recovery))
-      goto normal_entry;
-    else if (data)
-      goto recover;
-    while (counter.fetch_sub(1) == 1)   // Are there any threads above us?
+    if (AI_UNLIKELY(exception_recovery))
     {
-      {
-        // Pop and callback sequence.
-        std::lock_guard<std::mutex> lock(m_events_mutex);
-        if (m_events.empty())
-          break;
-        data = &m_events.front();
-      }
-      need_pop_front = true;
-  normal_entry:
+      if (data)
+        goto recover_from_exception_retry;
+      goto recover_from_exception_no_retry;
+    }
+
+    for (;;)
+    {
       if (m_busy_depth.fetch_add(1) == 0)
       {
-  recover:                              // Recover from an exception thrown by m_callback.
+  recover_from_exception_retry:
         // Non-blocking critical area.
         m_callback(*data);              // data is passed as const reference.
       }
@@ -270,8 +271,22 @@ responsible to catch that exception and then do one of two things:
         std::lock_guard<std::mutex> lock(m_events_mutex);
         m_events.push_back(*data);
       }
+
       if (AI_UNLIKELY(need_pop_front))
         m_events.pop_front();
+
+  recover_from_exception_no_retry:
+      if (counter.fetch_sub(1) > 1)     // Are there any threads above us?
+        break;
+
+      {
+        // Pop and callback sequence.
+        std::lock_guard<std::mutex> lock(m_events_mutex);
+        if (m_events.empty())
+          break;
+        data = &m_events.front();
+      }
+      need_pop_front = true;
     }
   }
 
@@ -291,8 +306,7 @@ responsible to catch that exception and then do one of two things:
     bool need_pop_front;
     Request<TYPE>* self;
     QueueGuard(Request<TYPE>* self_) : need_pop_front(false), self(self_) { }
-    ~QueueGuard() { pop_front(); }
-    void pop_front()
+    ~QueueGuard()
     {
       if (AI_UNLIKELY(need_pop_front))
       {
@@ -303,29 +317,21 @@ responsible to catch that exception and then do one of two things:
   };
 
   template<typename TYPE>
-  void Request<TYPE::handle(TYPE const* data, bool exception_recovery)
+  void Request<TYPE>::handle(TYPE const* data, bool exception_recovery)
   {
     QueueGuard events_queue(this);              // Cause a final pop_front() when this function is left with an exception.
-    if (AI_LIKELY(!exception_recovery))
-      goto normal_entry;
-    else if (data)
-      goto recover_with_data;
-    // Recover from an exception, not repeating the previous data.
-    while (m_busy_depth.fetch_sub(1) == 1)      // Are there any threads above us?
+    if (AI_UNLIKELY(exception_recovery))
     {
-      {
-        // Pop and callback sequence.
-        std::lock_events_queue<std::mutex> lock(m_events_mutex);
-        if (m_events.empty())
-          break;
-        data = &m_events.front();
-      }
-      events_queue.need_pop_front = true;       // Handle a previously queued event.
+      if (data)
+        goto recover_from_exception_retry;
+      goto recover_from_exception_no_retry;
+    }
 
-  normal_entry:                                 // Handle new event `data'.
+    for (;;)
+    {
       if (m_busy_depth.fetch_add(1) == 0)
       {
-  retry:                                        // Retry call back with the same data after an exception was thrown by m_callback.
+  recover_from_exception_retry:
         // Non-blocking critical area.
         m_callback(*data);                      // data is passed as const reference.
       }
@@ -336,7 +342,24 @@ responsible to catch that exception and then do one of two things:
         m_events.push_back(*data);
       }
 
-      events_queue.pop_front();
+      if (AI_UNLIKELY(events_queue.need_pop_front))
+      {
+        std::lock_guard<std::mutex> lock(m_events_mutex);
+        m_events.pop_front();
+      }
+
+  recover_from_exception_no_retry:
+      if (counter.fetch_sub(1) > 1)             // Are there any threads above us?
+        break;
+
+      {
+        // Pop and callback sequence.
+        std::lock_events_queue<std::mutex> lock(m_events_mutex);
+        if (m_events.empty())
+          break;
+        data = &m_events.front();
+      }
+      events_queue.need_pop_front = true;       // Handle a previously queued event.
     }
     // Stop the destructor from calling pop_front() when we exit normally.
     events_queue.need_pop_front = false;
@@ -354,14 +377,83 @@ that protects the callback object (but without blocking threads, even if the
 the callback takes a long time): it is possible that the same object requests
 multiple events of different TYPE with different callback's (member functions),
 yet we only want to call a single member function at a time. This requires to
-use a single BusyInterface object for the object that receives the callbacks
-and that it cannot dependend on TYPE which might vary per member function.
+use a single BusyInterface object, for the object that receives the callbacks,
+that cannot dependend on TYPE.
 
 Hence, we cannot store TYPE objects directly into m_events. Instead we create
 new objects that depend on TYPE but are derived from a common base class,
 and store pointers to that base class in the queue.
 
-So, it can happen that a thread in Request<TYPE1>::handle begins to handle
-a queued event of TYPE2. In order to handle that, it needs to call
-Request<TYPE2>::handle
+Therefore it can happen that a thread in Request<TYPE1>::handle begins to
+handle a queued event of TYPE2. In order to handle that, it needs to call
+Request<TYPE2>::handle.
+
+Lets start with factoring in the busy interface.
+Also, let handle() return a boolean that is used for the non-one-shot case;
+if true is returned and the request isn't a one-shot then remove the request
+from the server.
+
+  template<typename TYPE>
+  bool Request<TYPE>::handle(TYPE const* data, bool exception_recovery)
+  {
+    // In the case of a one-shot, make sure that there is a balance between
+    // the number of calls to request() and the number of calls to m_callback().
+    int handled = TYPE::one_shot ? m_handled.fetch_add(1) : m_handled.load();
+    if (handled)
+      return true;                              // Already handled.
+
+    // If there is no busy interface, just do the call back.
+    if (!bi)
+    {
+      m_callback(data);                         // Multiple threads might call this concurrently.
+      return false;                             // Keep request when it isn't one_shot.
+    }
+
+    // Cause a final pop_front() when this function is left with an exception.
+    QueueGuard events_queue(this);
+
+    if (AI_UNLIKELY(exception_recovery))
+    {
+      if (data)
+        goto recover_from_exception_retry;
+      goto recover_from_exception_no_retry;
+    }
+
+    for (;;)
+    {
+      if (m_busy_interface->m_busy_depth.fetch_add(1) == 0)
+      {
+  recover_from_exception_retry:
+        // Non-blocking critical area.
+        m_callback(*data);                      // data is passed as const reference.
+      }
+      else
+      {
+        // Queue sequence.
+        std::lock_events_queue<std::mutex> lock(m_busy_interface->m_events_mutex);
+        m_busy_interface->m_events.push_back(*data);
+      }
+
+      if (AI_UNLIKELY(events_queue.need_pop_front))
+      {
+        std::lock_guard<std::mutex> lock(m_busy_interface->m_events_mutex);
+        m_busy_interface->m_events.pop_front();
+      }
+
+  recover_from_exception_no_retry:
+      if (m_busy_interface->m_busy_depth.fetch_sub(1) > 1)      // Are there any threads above us?
+        break;
+
+      {
+        // Pop and callback sequence.
+        std::lock_events_queue<std::mutex> lock(m_busy_interface->m_events_mutex);
+        if (m_busy_interface->m_events.empty())
+          break;
+        data = &m_busy_interface->m_events.front();
+      }
+      events_queue.need_pop_front = true;       // Handle a previously queued event.
+    }
+    // Stop the destructor from calling pop_front() when we exit normally.
+    events_queue.need_pop_front = false;
+  }
 
