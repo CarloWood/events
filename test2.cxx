@@ -56,8 +56,6 @@ class MyEventClient1
 {
   int m_magic;
   event::BusyInterface m_bi[2];        // 0 = foo, 1 = bar.
-  event::request_handle<FooEventType> m_foo_request_handle;
-  event::request_handle<BarEventType> m_bar_request_handle;
  public:
   void handle_foo(FooEventType const& data)
   {
@@ -69,10 +67,10 @@ class MyEventClient1
     DoutEntering(dc::notice, "MyEventClient1::bar(" << data << ")");
   }
   MyEventClient1() : m_magic(12345678) { }
-  ~MyEventClient1() { m_foo_request_handle.reset(); m_bar_request_handle.reset(); m_magic = 0; }
+  ~MyEventClient1() { m_magic = 0; }
 
-  void set_busy(int bi = 0) { m_bi[bi].set_busy(); }
-  void unset_busy(int bi = 0) { m_bi[bi].unset_busy(); }
+  void set_busy(int bi = 0) { /* FIXME m_bi[bi].set_busy(); */ }
+  void unset_busy(int bi = 0) { /* FIXME m_bi[bi].unset_busy(); */ }
 };
 
 using Cookie = int;
@@ -80,7 +78,6 @@ using Cookie = int;
 class MyEventClient2
 {
   int m_magic;
-  event::request_handle<FooEventType> m_request_handle;
  public:
   void handle_foo(FooEventType const& data, Cookie cookie)
   {
@@ -89,7 +86,7 @@ class MyEventClient2
     ASSERT(m_magic == 123456789);
   }
   MyEventClient2() : m_magic(123456789) { }
-  ~MyEventClient2() { m_request_handle.reset(); m_magic = 0; }
+  ~MyEventClient2() { m_magic = 0; }
 };
 
 //=============================================================================
@@ -112,11 +109,11 @@ int main()
   BarEventType bartype(200);    // Event data of bar starts at 200.
 
   MyEventClient1 client1;
-  event::request_handle<FooEventType> client1_foo_request;
-  event::request_handle<BarEventType> client1_bar_request;
+  event::RequestHandle<FooEventType> client1_foo_request;
+  event::RequestHandle<BarEventType> client1_bar_request;
   {
     MyEventClient2 client2;
-    event::request_handle<FooEventType> client2_foo_request;
+    event::RequestHandle<FooEventType> client2_foo_request;
     {
       MyEventClient2 client_tmp;
       client2 = std::move(client_tmp);
@@ -162,6 +159,7 @@ int main()
     Dout(dc::notice, "client1 foo unset busy:");
     client1.unset_busy();
 
+    client2_foo_request.reset();
   } // Destruct client2.
 
   Dout(dc::notice, "Trigger foo(" << footype << ") -> client1, [client2]:");
@@ -174,6 +172,9 @@ int main()
 
   Dout(dc::notice, "client1 bar unset busy:");
   client1.unset_busy(1);
+
+  client1_foo_request.reset();
+  client1_bar_request.reset();
 
   Dout(dc::notice, "Leaving main");
 }

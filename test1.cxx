@@ -1,5 +1,6 @@
 #include "sys.h"
 #include "Events.h"
+#include <functional>
 
 class MyEventData
 {
@@ -31,8 +32,6 @@ void my_callback(MyEventType const& event)
 
 struct Foo
 {
-  event::request_handle<MyEventType> m_request_handle;
-
   void callback(MyEventType const& event) const
   {
     DoutEntering(dc::notice, "Foo::callback(" << event << ")");
@@ -42,8 +41,6 @@ struct Foo
   {
     DoutEntering(dc::notice, "Foo::callback_with_cookie(" << event << ", " << cookie << ")");
   }
-
-  ~Foo() { m_request_handle.reset(); }
 };
 
 int main()
@@ -59,7 +56,7 @@ int main()
 
   // Register a member function of object foo as callback.
   Foo foo;
-  event::request_handle<MyEventType> foo_request[3];
+  event::RequestHandle<MyEventType> foo_request[3];
   foo_request[0] = event_server.request(foo, &Foo::callback);
 
   // Register a member function and pass a cookie.
@@ -74,4 +71,7 @@ int main()
 
   // Trigger the event.
   event_server.trigger(42);
+
+  for (int i = 0; i < 3; ++i)
+    foo_request[i].reset();
 }

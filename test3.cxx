@@ -1,6 +1,7 @@
 #include "sys.h"
 #include "debug.h"
 #include "Events.h"
+#include <thread>
 
 class Data
 {
@@ -38,7 +39,7 @@ class Foo
 {
   int m_magic;
   event::BusyInterface m_foo_bi;
-  event::request_handle<FooType> m_handle;
+  event::RequestHandle<FooType> m_handle;
 
  public:
   static std::thread s_trigger_thread;
@@ -71,12 +72,15 @@ int main()
   Foo foo;
   {
     // The request with cookie 222 is destructed before the event is triggered and should therefore never be called.
-    event::request_handle<FooType> handle2 = server.request(foo, &Foo::foo, cookie, 222);
+    event::RequestHandle<FooType> handle2 = server.request(foo, &Foo::foo, cookie, 222);
     foo.request(&Foo::foo, cookie, 111);
   }
   FooType type(42);
   server.trigger(type);
   server.trigger(type);
 
-  Foo::s_trigger_thread.join();
+  if (Foo::s_trigger_thread.joinable())
+    Foo::s_trigger_thread.join();
+  else
+    Dout(dc::warning, "s_trigger_thread was not started.");
 }
