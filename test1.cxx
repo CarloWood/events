@@ -73,5 +73,7 @@ int main()
   event_server.trigger(42);
 
   for (int i = 0; i < 3; ++i)
-    foo_request[i].reset();
+    foo_request[i].cancel();
+  handle1.cancel();
+  handle2.cancel();
 }

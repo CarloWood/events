@@ -54,8 +54,10 @@ using BarEventServer = event::Server<BarEventType>;
 
 class MyEventClient1
 {
+ private:
   int m_magic;
   event::BusyInterface m_bi[2];        // 0 = foo, 1 = bar.
+
  public:
   void handle_foo(FooEventType const& data)
   {
@@ -69,8 +71,10 @@ class MyEventClient1
   MyEventClient1() : m_magic(12345678) { }
   ~MyEventClient1() { m_magic = 0; }
 
-  void set_busy(int bi = 0) { /* FIXME m_bi[bi].set_busy(); */ }
-  void unset_busy(int bi = 0) { /* FIXME m_bi[bi].unset_busy(); */ }
+  void set_busy(int bi = 0) { m_bi[bi].set_busy(); }
+  void unset_busy(int bi = 0) { m_bi[bi].unset_busy(); }
+
+  event::BusyInterface& bi(int i) { return m_bi[i]; }
 };
 
 using Cookie = int;
@@ -120,8 +124,8 @@ int main()
     }
 
     // Request events for Client1:
-    client1_foo_request = request_foo.request(client1, &MyEventClient1::handle_foo);
-    client1_bar_request = request_bar.request(client1, &MyEventClient1::handle_bar);
+    client1_foo_request = request_foo.request(client1, &MyEventClient1::handle_foo, client1.bi(0));
+    client1_bar_request = request_bar.request(client1, &MyEventClient1::handle_bar, client1.bi(1));
 
     // Request event for Client2:
     Cookie cookie = 123;
@@ -143,7 +147,7 @@ int main()
     request_bar.trigger(bartype);
     bartype.inc();                // Increment event data of bar to 201.
     // Re-request bar, because that event resets every time.
-    client1_bar_request = request_bar.request(client1, &MyEventClient1::handle_bar);
+    client1_bar_request = request_bar.request(client1, &MyEventClient1::handle_bar, client1.bi(1));
 
     Dout(dc::notice, "client1 bar busy:");
     client1.set_busy(1);
@@ -159,7 +163,7 @@ int main()
     Dout(dc::notice, "client1 foo unset busy:");
     client1.unset_busy();
 
-    client2_foo_request.reset();
+    client2_foo_request.cancel();
   } // Destruct client2.
 
   Dout(dc::notice, "Trigger foo(" << footype << ") -> client1, [client2]:");
@@ -173,8 +177,8 @@ int main()
   Dout(dc::notice, "client1 bar unset busy:");
   client1.unset_busy(1);
 
-  client1_foo_request.reset();
-  client1_bar_request.reset();
+  client1_foo_request.cancel();
+  client1_bar_request.cancel();
 
   Dout(dc::notice, "Leaving main");
 }

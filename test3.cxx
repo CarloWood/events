@@ -25,11 +25,14 @@ struct Cookie { };
 
 event::Server<FooType> server;
 
+int constexpr N = 6;
+
 void do_trigger()
 {
-  static int count;
-  if (++count == 4)
+  static std::atomic_int count;
+  if (count == N - 2)
     return;
+  ++count;
   Debug(NAMESPACE_DEBUG::init_thread());
   FooType type(21);
   server.trigger(type);
@@ -42,14 +45,17 @@ class Foo
   event::RequestHandle<FooType> m_handle;
 
  public:
-  static std::thread s_trigger_thread;
+  static std::thread s_trigger_threads[N];
+  static std::atomic_int thr;
 
   void foo(FooType const& type, Cookie, int n)
   {
     DoutEntering(dc::notice, "Foo::foo(" << type << ", " << n << ")");
     ASSERT(m_magic == 12345678);
     std::thread t(do_trigger);
-    t.swap(s_trigger_thread);
+    int m = thr.fetch_add(1);
+    ASSERT(m < N);
+    t.swap(s_trigger_threads[m]);
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
@@ -59,10 +65,11 @@ class Foo
   }
 
   Foo() : m_magic(12345678) { }
-  ~Foo() { m_handle.reset(); m_magic = 0; }
+  ~Foo() { m_handle.cancel(); m_magic = 0; }
 };
 
-std::thread Foo::s_trigger_thread;
+std::thread Foo::s_trigger_threads[N];
+std::atomic_int Foo::thr;
 
 int main()
 {
@@ -74,13 +81,15 @@ int main()
     // The request with cookie 222 is destructed before the event is triggered and should therefore never be called.
     event::RequestHandle<FooType> handle2 = server.request(foo, &Foo::foo, cookie, 222);
     foo.request(&Foo::foo, cookie, 111);
+    handle2.cancel();
   }
   FooType type(42);
   server.trigger(type);
   server.trigger(type);
 
-  if (Foo::s_trigger_thread.joinable())
-    Foo::s_trigger_thread.join();
-  else
-    Dout(dc::warning, "s_trigger_thread was not started.");
+  for (int m = 0; m < N; ++m)
+    if (Foo::s_trigger_threads[m].joinable())
+      Foo::s_trigger_threads[m].join();
+    else
+      Dout(dc::warning, "s_trigger_threads[" << m << "] was not started.");
 }

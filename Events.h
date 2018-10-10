@@ -49,11 +49,24 @@
 #include <functional>
 #include <condition_variable>
 #include <atomic>
+#include <deque>
 
 namespace event {
 
-class BusyInterface
+struct QueuedEventBase;
+
+struct BusyInterface
 {
+ //FIXME: make members private.
+ //private:
+  std::atomic_uint m_busy_depth;
+  std::mutex m_events_mutex;
+  std::deque<QueuedEventBase const*> m_events;
+
+ public:
+  BusyInterface() : m_busy_depth(0) { }
+  bool set_busy() { return m_busy_depth.fetch_add(1) == 0; }
+  bool unset_busy() { return m_busy_depth.fetch_sub(1) == 1; }
 };
 
 template<typename TYPE>
@@ -66,8 +79,8 @@ class Request
 
  private:
   friend class Server<TYPE>;
-  BusyInterface* m_busy_interface;
   std::function<void(TYPE const&)> m_callback;
+  BusyInterface* m_busy_interface;
   Request* m_next;
   std::atomic_int m_handle_count;
   std::mutex m_cancel_mutex;
@@ -75,7 +88,7 @@ class Request
 
  public:
   Request(std::function<void(TYPE const&)>&& callback, BusyInterface* busy_interface = nullptr) :
-      m_busy_interface(busy_interface), m_callback(std::move(callback)), m_handle_count(0) { Dout(dc::notice, "Constructing Request [" << this << "]"); }
+      m_callback(std::move(callback)), m_busy_interface(busy_interface), m_handle_count(0) { Dout(dc::notice, "Constructing Request [" << this << "]"); }
   ~Request()
   {
     Dout(dc::notice, "Destructing Request [" << this << "]");
@@ -83,12 +96,64 @@ class Request
     ASSERT(m_handle_count < 0);
   }
 
-  bool start_handling();
-  void handle(TYPE const& data);
-  void stop_handling();
+  // Increment m_handle_count atomically by 1 if and only if the Request wasn't canceled (m_handle_count is negative).
+  // Return 0 if the request needs handling (wasn't canceled), or
+  // return -1 if the request was canceled and no other thread is handling it, return 1 otherwise.
+  int start_handling()
+  {
+    int handle_count = m_handle_count;
+    do
+    {
+      // Was this request canceled?
+      if (AI_UNLIKELY(handle_count < 0))
+        return (handle_count == -s_cancel_marker) ? -1 : 1;
+    }
+    while (!m_handle_count.compare_exchange_weak(handle_count, handle_count + 1));
+    return 0;
+  }
+
+  // Subtract 1 from m_handle_count. If this was the last thread to leave the area
+  // between start_handling and stop_handling then wake up the thread that called
+  // cancel and is waiting there.
+  void stop_handling()
+  {
+    if (AI_UNLIKELY(m_handle_count.fetch_sub(1) == 1 - s_cancel_marker))  // Canceled and no threads left?
+    {
+      // Don't call notify_one() before the thread inside cancel() entered wait() and unlocked the mutex.
+      m_cancel_mutex.lock();
+      m_cancel_mutex.unlock();
+      // Wake it up.
+      m_cancel_cv.notify_one();
+    }
+  }
+
+  void handle(Server<TYPE>* server, TYPE const& data)
+  {
+    DoutEntering(dc::notice, "[" << (void*)this << "]::handle(server, " << data << ")");
+    if (!m_busy_interface)
+      m_callback(data);
+    else
+      handle_bi(server, &data);
+  }
+
+  void rehandle(TYPE const& data)
+  {
+    DoutEntering(dc::notice, "[" << (void*)this << "]::rehandle(" << data << ")");
+    m_callback(data);
+  }
+
+  void handle_bi(Server<TYPE>* server, TYPE const* data);
   void cancel();
+
+#ifdef CWDEBUG
+  bool is_canceled() const { return m_handle_count == -s_cancel_marker; }
+#endif
 };
 
+// RequestHandle is NOT thread safe!
+// It can only be moved, and cancel() may only be called once (by a single thread obviously).
+// Moreover, cancel() must be called before any objects are destructed that are needed for
+// the callback of this request.
 template<typename TYPE>
 class RequestHandle
 {
@@ -97,9 +162,31 @@ class RequestHandle
   Request<TYPE>* m_request;
 
  public:
-  RequestHandle();
-  RequestHandle(Request<TYPE>* request);
-  void reset();
+  RequestHandle() : m_request(nullptr) { }
+  ~RequestHandle() { /* Call cancel() before destructing anything that is needed for the callback */ ASSERT(!m_request || m_request->is_canceled()); }
+  RequestHandle(Request<TYPE>* request) : m_request(request) { }
+  RequestHandle& operator=(RequestHandle&& orig) { m_request = orig.m_request; orig.m_request = nullptr; return *this; }
+  void cancel();
+};
+
+class QueuedEventBase
+{
+ public:
+  virtual ~QueuedEventBase() { }
+  virtual void rehandle() const = 0;
+  void operator delete(void* ptr, size_t) { utils::NodeMemoryPool::static_free(ptr); }
+};
+
+template<typename TYPE>
+struct QueuedEvent : QueuedEventBase
+{
+  Request<TYPE>* m_request;
+  TYPE m_data;
+
+  QueuedEvent(Request<TYPE>* request, TYPE const& data) : m_request(request), m_data(data) { }
+
+ private:
+  void rehandle() const override;
 };
 
 template<typename TYPE>
@@ -109,6 +196,7 @@ class Server
   std::mutex m_request_list_mutex;              // Locked when changing any Request<TYPE>* that is part of m_request_list,
   Request<TYPE>* m_request_list;                // so that integrity of m_request_list is guaranteed when the mutex is not locked.
   utils::NodeMemoryPool m_request_memory_pool;
+  utils::NodeMemoryPool m_queued_event_memory_pool;
 
   // Insert the newly allocated new_request in the front of the list.
   void push_front(Request<TYPE>* new_request)
@@ -127,25 +215,27 @@ class Server
   }
 
  public:
-  Server() : m_request_list(nullptr), m_request_memory_pool(64, sizeof(Request<TYPE>)) { }
+  Server() : m_request_list(nullptr), m_request_memory_pool(64, sizeof(Request<TYPE>)), m_queued_event_memory_pool(32, sizeof(QueuedEvent<TYPE>)) { }
 
   void trigger(TYPE const& data);
 
   // Passing directly a std::function.
   [[nodiscard]] RequestHandle<TYPE> request(std::function<void(TYPE const&)>&& callback)
   {
-    Dout(dc::notice, "Calling Server::request(std::function<void(" << libcwd::type_info_of<TYPE>().demangled_name() << " const&)>&&)");
+    Dout(dc::notice|continued_cf, "Calling Server::request(std::function<void(" << libcwd::type_info_of<TYPE>().demangled_name() << " const&)>&&) ");
     Request<TYPE>* request = new (m_request_memory_pool) Request<TYPE>(std::move(callback));
     push_front(request);
+    Dout(dc::finish, "--> [" << (void*)request << ']');
     return request;
   }
 
   // Passing directly a std::function and busy interface.
   [[nodiscard]] RequestHandle<TYPE> request(std::function<void(TYPE const&)>&& callback, BusyInterface& busy_interface)
   {
-    Dout(dc::notice, "Calling Server::request(std::function<void(" << libcwd::type_info_of<TYPE>().demangled_name() << " const&)>&&, BusyInterface& [" << (void*)&busy_interface << "])");
+    Dout(dc::notice|continued_cf, "Calling Server::request(std::function<void(" << libcwd::type_info_of<TYPE>().demangled_name() << " const&)>&&, BusyInterface& [" << (void*)&busy_interface << "]) ");
     Request<TYPE>* request = new (m_request_memory_pool) Request<TYPE>(std::move(callback), &busy_interface);
     push_front(request);
+    Dout(dc::finish, "--> [" << (void*)request << ']');
     return request;
   }
 
@@ -153,20 +243,22 @@ class Server
   template<class CLIENT, typename... Args>
   [[nodiscard]] RequestHandle<TYPE> request(CLIENT& client, void (CLIENT::*cb)(TYPE const&, Args...), Args... args)
   {
-    Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << "&, " << libcwd::type_info_of(cb).demangled_name() << ", ...)");
+    Dout(dc::notice|continued_cf, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << "&, " << libcwd::type_info_of(cb).demangled_name() << ", ...) ");
     using namespace std::placeholders;
     Request<TYPE>* request = new (m_request_memory_pool) Request<TYPE>(std::bind(cb, &client, _1, args...));
     push_front(request);
+    Dout(dc::finish, "--> [" << (void*)request << ']');
     return request;
   }
 
   template<class CLIENT, typename... Args>
   [[nodiscard]] RequestHandle<TYPE> request(CLIENT& client, void (CLIENT::*cb)(TYPE const&, Args...), BusyInterface& busy_interface, Args... args)
   {
-    Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << "&, " << libcwd::type_info_of(cb).demangled_name() << ", BusyInterface& [" << (void*)&busy_interface << "], ...)");
+    Dout(dc::notice|continued_cf, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << "&, " << libcwd::type_info_of(cb).demangled_name() << ", BusyInterface& [" << (void*)&busy_interface << "], ...) ");
     using namespace std::placeholders;
     Request<TYPE>* request = new (m_request_memory_pool) Request<TYPE>(std::bind(cb, &client, _1, args...), &busy_interface);
     push_front(request);
+    Dout(dc::finish, "--> [" << (void*)request << ']');
     return request;
   }
 
@@ -181,38 +273,38 @@ class Server
   template<class CLIENT, typename... Args>
   [[nodiscard]] RequestHandle<TYPE> request(CLIENT const& client, void (CLIENT::*cb)(TYPE const&, Args...) const, Args... args)
   {
-    Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << " const&, " << libcwd::type_info_of(cb).demangled_name() << ", ...)");
+    Dout(dc::notice|continued_cf, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << " const&, " << libcwd::type_info_of(cb).demangled_name() << ", ...) ");
     using namespace std::placeholders;
     Request<TYPE>* request = new (m_request_memory_pool) Request<TYPE>(std::bind(cb, &client, _1, args...));
     push_front(request);
+    Dout(dc::finish, "--> [" << (void*)request << ']');
     return request;
   }
 
   template<class CLIENT, typename... Args>
   [[nodiscard]] RequestHandle<TYPE> request(CLIENT const& client, void (CLIENT::*cb)(TYPE const&, Args...) const, BusyInterface& busy_interface, Args... args)
   {
-    Dout(dc::notice, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << " const&, " << libcwd::type_info_of(cb).demangled_name() << ", BusyInterface& [" << (void*)&busy_interface << "], ...)");
+    Dout(dc::notice|continued_cf, "Calling Server::request(" << libcwd::type_info_of<CLIENT>().demangled_name() << " const&, " << libcwd::type_info_of(cb).demangled_name() << ", BusyInterface& [" << (void*)&busy_interface << "], ...) ");
     using namespace std::placeholders;
     Request<TYPE>* request = new (m_request_memory_pool) Request<TYPE>(std::bind(cb, &client, _1, args...), &busy_interface);
     push_front(request);
+    Dout(dc::finish, "--> [" << (void*)request << ']');
     return request;
+  }
+
+  QueuedEvent<TYPE>* alloc_queued_event(Request<TYPE>* request, TYPE const* data)
+  {
+    return new (m_queued_event_memory_pool) QueuedEvent<TYPE>(request, *data);
   }
 };
 
 template<typename TYPE>
-RequestHandle<TYPE>::RequestHandle() : m_request(nullptr)
+void RequestHandle<TYPE>::cancel()
 {
-}
-
-template<typename TYPE>
-RequestHandle<TYPE>::RequestHandle(Request<TYPE>* request) : m_request(request)
-{
-}
-
-template<typename TYPE>
-void RequestHandle<TYPE>::reset()
-{
+  // Only call cancel() once.
+  ASSERT(m_request);
   m_request->cancel();
+  m_request = nullptr;
 }
 
 template<typename TYPE>
@@ -232,7 +324,7 @@ void Server<TYPE>::trigger(TYPE const& data)
     Request<TYPE>* request = head;
     while (request)
     {
-      request->handle(data);
+      request->handle(this, data);
       request = request->m_next;
     }
     // Return request memory to the memory pool.
@@ -246,81 +338,116 @@ void Server<TYPE>::trigger(TYPE const& data)
   }
   else
   {
-    // The singly linked list has the following structure:
-    // m_request_list --> Request<TYPE>
-    //                    .m_next       --> Request<TYPE>
-    //                                      .m_next       --> Request<TYPE>
-    //                                                        .m_next == nullptr
-    // Let *next point to the next Request<TYPE> object if it exists, otherwise *ptr == nullptr.
     Request<TYPE>** next = &m_request_list;     // Let *next point to the first object.
+    std::unique_lock<std::mutex> lock(m_request_list_mutex);
     for (;;)
     {
-      Request<TYPE>*& request = *next;
+      Request<TYPE>* request;
+
+      // Find and stop the next request object from being deleted (or delink it if that fails).
+      int state;
+      while ((request = *next) &&
+             AI_UNLIKELY((state = request->start_handling())))  // -1: Canceled and no thread is handling the request.
+                                                                //  0: Not canceled.
+                                                                //  1: Canceled but one or more threads are handling the request.
       {
-        std::lock_guard<std::mutex> lock(m_request_list_mutex);
-        // Find and stop the next request object from being deleted (or delete it if that fails).
-        while (request && !request->start_handling())
-          delink(request);
+        // request is canceled.
+        if (state == -1)
+        {
+          delink(*next);
+          m_request_memory_pool.free(request);
+        }
+        else
+          next = &request->m_next;
       }
-      if (!request)     // That was the last request in the list?
+      if (!request)
         break;
 
-      request->handle(data);
+      lock.unlock();
+      // While a thread is here, start_handling() was called at least once on this request
+      // causing other threads that call start_handling() to never get -1 and therefore never
+      // to delink and free this request object. start_handling() can only ever start to
+      // return -1 again after we called stop_handling(), but at that point we own m_request_list_mutex
+      // again, so that still no other thread can be delinking this request object.
+      request->handle(this, data);
+      lock.lock();
 
-      std::lock_guard<std::mutex> lock(m_request_list_mutex);
-      request->stop_handling();               // Allow this request object to be canceled again.
+      // Allow this request object to delinked and freed as soon as we unlock m_request_list_mutex.
+      // This is call might cause the associated RequestHandle and any object needed for the callback
+      // to be immediately destructed (by another thread, currently blocked in cancel()), but not
+      // the Request object itself.
+      request->stop_handling();
       next = &request->m_next;
     }
   }
 }
 
 template<typename TYPE>
-bool Request<TYPE>::start_handling()
+void Request<TYPE>::handle_bi(Server<TYPE>* server, TYPE const* data)
 {
-  int handle_count = m_handle_count.fetch_add(1);
-  bool result = handle_count >= 0;
-  if (AI_UNLIKELY(!result))
+  DoutEntering(dc::notice, "Request<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::handle_bi(server, &{" << *data << "}) [" << (void*)this << "]");
+  // Atomically increment the "busy counter" of the busy interface.
+  if (!m_busy_interface->set_busy())
   {
-    // Minor optimization: don't call stop_handling() when we know that isn't necessary.
-    // Note that this doesn't stop the possibility that stop_handling() will be called
-    // and detect that m_handle_count reaches -0x10000 multiple times, it just makes it
-    // very unlikely.
-    if (handle_count == -s_cancel_marker)
-      m_handle_count.fetch_sub(1);
+    Dout(dc::notice, "Queuing event because busy interface is busy.");
+    // Queue sequence.
+    QueuedEventBase const* new_queued_event = server->alloc_queued_event(this, data);
+    std::lock_guard<std::mutex> lock(m_busy_interface->m_events_mutex);
+    m_busy_interface->m_events.push_back(new_queued_event);
+  }
+  else
+  {
+    m_callback(*data);
+  }
+  // Atomically decrement the "busy counter" of the busy interface.
+  while (m_busy_interface->unset_busy())        // Exit this function if there are one or more other threads above us (let the last thread to get here handle the queue).
+  {
+    Dout(dc::notice, "Unset_busy returned true: this thread is responsible for emptying the queue.");
+    // Pop and callback sequence.
+    QueuedEventBase const* queued_event = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(m_busy_interface->m_events_mutex);
+      if (m_busy_interface->m_events.empty())
+        break;                                  // No events left in the queue: we're done.
+      queued_event = m_busy_interface->m_events.front();
+      m_busy_interface->m_events.pop_front();
+    }
+    Dout(dc::notice|continued_cf, "Processing one event from the queue... ");
+    if (m_busy_interface->set_busy())           // After this set_busy() call we need to return to the top of the while loop of course, to call unset_busy().
+    {
+      queued_event->rehandle();
+      delete queued_event;
+    }
     else
-      stop_handling();
+    {
+      // If rehandling failed then the queued event needs to be put back into the queue.
+      // Note that in this case the call to unset_busy() above is likely to return false
+      // and we won't retry to process this same event again.
+      // Put the event back in the front of the queue so that the thread that caused
+      // rehandle to fail will process this event first once it is done.
+      std::lock_guard<std::mutex> lock(m_busy_interface->m_events_mutex);
+      m_busy_interface->m_events.push_front(queued_event);
+    }
+    Dout(dc::finish, "done");
   }
-  return result;
 }
 
 template<typename TYPE>
-void Request<TYPE>::handle(TYPE const& data)
+void QueuedEvent<TYPE>::rehandle() const
 {
-  m_callback(data);
-}
-
-template<typename TYPE>
-void Request<TYPE>::stop_handling()
-{
-  if (m_handle_count.fetch_sub(1) == 1 - s_cancel_marker)
-  {
-    // Don't call notify_one() before the thread inside cancel() entered wait() and unlocked the mutex.
-    m_cancel_mutex.lock();
-    m_cancel_mutex.unlock();
-    // Wake it up.
-    m_cancel_cv.notify_one();
-  }
+  m_request->rehandle(m_data);
 }
 
 template<typename TYPE>
 void Request<TYPE>::cancel()
 {
   // Lock m_cancel_mutex before (possibly) making the condition (m_handle_count reached -s_cancel_marker) true.
-  std::unique_lock<std::mutex> lock(m_cancel_mutex);
-  if (m_handle_count.fetch_sub(s_cancel_marker) == 0)   // Did we reach -s_cancel_marker?
-    return;
-  // Wait until m_handle_count becomes -s_cancel_marker.
-  m_cancel_cv.wait(lock);
+  if (m_handle_count.fetch_sub(s_cancel_marker) > 0)    // Are there still threads handling this request?
+  {
+    // Wait until all threads finished handling this request (called stop_handling()).
+    std::unique_lock<std::mutex> lock(m_cancel_mutex);
+    m_cancel_cv.wait(lock, [this]{ return m_handle_count == -s_cancel_marker; });
+  }
 }
 
 } // namespace event
