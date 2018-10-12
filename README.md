@@ -3,7 +3,8 @@
 This repository is a [git submodule](https://git-scm.com/book/en/v2/Git-Tools-Submodules)
 providing a thread-safe event manager system that allows multiple threads
 to generate events (also the same event) concurrently; dispatching the events
-as callbacks, either one-shot or persisting (until cancel() is called).
+as callbacks, either one-shot or persisting (until `cancel()` is called on
+the request handle, see below).
 
 The following classes are defined (in namespace events):
 
@@ -14,7 +15,7 @@ The following classes are defined (in namespace events):
 * `RequestHandle<TYPE>` : the type returned by `Server<TYPE>::request()`.
   Keep this object around as long as you desire callbacks when events associated with `TYPE`
   happen. Call its method `cancel()` to stop callbacks and before destructing anything
-  that needed for the callback to be valid (including the RequestHandle itself).
+  that needed for the callback to be valid (including the `RequestHandle` itself).
 
 For example,
 
