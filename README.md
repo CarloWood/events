@@ -19,23 +19,23 @@ The following classes are defined (in namespace events):
 For example,
 
 ```
-    // Declare an event server.
-    Server<FooEvent> server;
+  // Declare an event server.
+  Server<FooEvent> server;
 
-    // One or more threads generate events:
-    FooEvent data;
-    server.trigger(data);
+  // One or more threads generate events:
+  FooEvent data;
+  server.trigger(data);
 
-    // Some other thread.
-    // Requesting callbacks for FooEvent.
-    Foo foo;
-    BusyInterface bi;
-    auto handle = server.request(foo, &Foo::callback, bi);
-    // Calls to Foo::callback(data) start happening, but only one thread at a time.
+  // Some other thread.
+  // Requesting callbacks for FooEvent.
+  Foo foo;
+  BusyInterface bi;
+  auto handle = server.request(foo, &Foo::callback, bi);
+  // Calls to Foo::callback(data) start happening, but only one thread at a time.
 
-    // Cancel the request.
-    handle.cancel();
-    // Now it is safe to destruct foo, bi and handle (in any order).
+  // Cancel the request.
+  handle.cancel();
+  // Now it is safe to destruct foo, bi and handle (in any order).
 ```
 
 The root project should be using
@@ -88,7 +88,7 @@ would also define
 
 ```
 foobar_CXXFLAGS = @LIBCWD_R_FLAGS@
-foobar_LDADD = ../events/libevents.la $(top_builddir)/cwds/libcwds_r.la
+foobar_LDADD = ../events/libevents.la ../utils/libutils_r.la ../cwds/libcwds_r.la
 ```
 
 or whatever the path to `events` is, to link with the required submodules,
