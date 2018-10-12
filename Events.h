@@ -145,13 +145,13 @@ class Request
     }
   }
 
-  void handle(Server<TYPE>* server, TYPE const& data)
+  void handle(TYPE const& data)
   {
-    DoutEntering(dc::notice, "[" << (void*)this << "]::handle(server, " << data << ")");
+    DoutEntering(dc::notice, "[" << (void*)this << "]::handle(" << data << ")");
     if (!m_busy_interface)
       m_callback(data);
     else
-      handle_bi(server, &data);
+      handle_bi(&data);
   }
 
   void rehandle(TYPE const& data)
@@ -160,7 +160,7 @@ class Request
     m_callback(data);
   }
 
-  void handle_bi(Server<TYPE>* server, TYPE const* data);
+  void handle_bi(TYPE const* data);
   void cancel();
 
 #ifdef CWDEBUG
@@ -336,7 +336,7 @@ void Server<TYPE>::trigger(TYPE const& data)
     Request<TYPE>* request = head;
     while (request)
     {
-      request->handle(this, data);
+      request->handle(data);
       request = request->m_next;
     }
     // Return request memory to the memory pool.
@@ -381,7 +381,7 @@ void Server<TYPE>::trigger(TYPE const& data)
       // to delink and free this request object. start_handling() can only ever start to
       // return -1 again after we called stop_handling(), but at that point we own m_request_list_mutex
       // again, so that still no other thread can be delinking this request object.
-      request->handle(this, data);
+      request->handle(data);
       lock.lock();
 
       // Allow this request object to delinked and freed as soon as we unlock m_request_list_mutex.
@@ -395,9 +395,9 @@ void Server<TYPE>::trigger(TYPE const& data)
 }
 
 template<typename TYPE>
-void Request<TYPE>::handle_bi(Server<TYPE>* server, TYPE const* data)
+void Request<TYPE>::handle_bi(TYPE const* data)
 {
-  DoutEntering(dc::notice, "Request<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::handle_bi(server, &{" << *data << "}) [" << (void*)this << "]");
+  DoutEntering(dc::notice, "Request<" << libcwd::type_info_of<TYPE>().demangled_name() << ">::handle_bi(&{" << *data << "}) [" << (void*)this << "]");
   // Atomically increment the "busy counter" of the busy interface.
   if (!m_busy_interface->set_busy())
   {
