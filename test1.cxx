@@ -49,14 +49,14 @@ int main()
   using namespace std::placeholders;
 
   // Instantiate the event server for MyEventType (this should become a singleton).
-  event::Server<MyEventType> event_server;
+  events::Server<MyEventType> event_server;
 
   // Register a callback by function pointer.
   auto handle1 = event_server.request(my_callback);
 
   // Register a member function of object foo as callback.
   Foo foo;
-  event::RequestHandle<MyEventType> foo_request[3];
+  events::RequestHandle<MyEventType> foo_request[3];
   foo_request[0] = event_server.request(foo, &Foo::callback);
 
   // Register a member function and pass a cookie.

@@ -23,7 +23,7 @@ struct FooType : public Data
 
 struct Cookie { };
 
-event::Server<FooType> server;
+events::Server<FooType> server;
 
 int constexpr N = 6;
 
@@ -41,8 +41,8 @@ void do_trigger()
 class Foo
 {
   int m_magic;
-  event::BusyInterface m_foo_bi;
-  event::RequestHandle<FooType> m_handle;
+  events::BusyInterface m_foo_bi;
+  events::RequestHandle<FooType> m_handle;
 
  public:
   static std::thread s_trigger_threads[N];
@@ -79,7 +79,7 @@ int main()
   Foo foo;
   {
     // The request with cookie 222 is destructed before the event is triggered and should therefore never be called.
-    event::RequestHandle<FooType> handle2 = server.request(foo, &Foo::foo, cookie, 222);
+    events::RequestHandle<FooType> handle2 = server.request(foo, &Foo::foo, cookie, 222);
     foo.request(&Foo::foo, cookie, 111);
     handle2.cancel();
   }

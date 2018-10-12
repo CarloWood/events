@@ -51,7 +51,7 @@
 #include <atomic>
 #include <deque>
 
-namespace event {
+namespace events {
 
 struct QueuedEventBase;
 
@@ -474,4 +474,4 @@ void Request<TYPE>::cancel()
 template<typename TYPE>
 utils::NodeMemoryPool RequestWithBI<TYPE>::s_queued_event_memory_pool(32, sizeof(QueuedEvent<TYPE>));
 
-} // namespace event
+} // namespace events

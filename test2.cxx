@@ -32,7 +32,7 @@ struct FooEventType : public EventData
   static constexpr bool one_shot = false;
 };
 
-using FooEventServer = event::Server<FooEventType>;
+using FooEventServer = events::Server<FooEventType>;
 
 //-----------------------------------------------------------------------------
 //
@@ -45,7 +45,7 @@ struct BarEventType : public EventData
   static constexpr bool one_shot = true;
 };
 
-using BarEventServer = event::Server<BarEventType>;
+using BarEventServer = events::Server<BarEventType>;
 
 //-----------------------------------------------------------------------------
 //
@@ -56,7 +56,7 @@ class MyEventClient1
 {
  private:
   int m_magic;
-  event::BusyInterface m_bi[2];        // 0 = foo, 1 = bar.
+  events::BusyInterface m_bi[2];        // 0 = foo, 1 = bar.
 
  public:
   void handle_foo(FooEventType const& data)
@@ -74,7 +74,7 @@ class MyEventClient1
   void set_busy(int bi = 0) { m_bi[bi].set_busy(); }
   void unset_busy(int bi = 0) { m_bi[bi].unset_busy(); }
 
-  event::BusyInterface& bi(int i) { return m_bi[i]; }
+  events::BusyInterface& bi(int i) { return m_bi[i]; }
 };
 
 using Cookie = int;
@@ -113,11 +113,11 @@ int main()
   BarEventType bartype(200);    // Event data of bar starts at 200.
 
   MyEventClient1 client1;
-  event::RequestHandle<FooEventType> client1_foo_request;
-  event::RequestHandle<BarEventType> client1_bar_request;
+  events::RequestHandle<FooEventType> client1_foo_request;
+  events::RequestHandle<BarEventType> client1_bar_request;
   {
     MyEventClient2 client2;
-    event::RequestHandle<FooEventType> client2_foo_request;
+    events::RequestHandle<FooEventType> client2_foo_request;
     {
       MyEventClient2 client_tmp;
       client2 = std::move(client_tmp);

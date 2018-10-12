@@ -5,8 +5,7 @@ SUBDIRS =
 noinst_LTLIBRARIES = libevents.la
 
 SOURCES = \
-	Events.h \
-	Events.cxx
+	Events.h
 
 libevents_la_SOURCES = ${SOURCES}
 libevents_la_CXXFLAGS = -std=c++11 @LIBCWD_R_FLAGS@
