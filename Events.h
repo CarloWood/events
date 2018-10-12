@@ -57,8 +57,7 @@ struct QueuedEventBase;
 
 struct BusyInterface
 {
- //FIXME: make members private.
- //private:
+ private:
   std::atomic_uint m_busy_depth;
   std::mutex m_events_mutex;
   std::deque<QueuedEventBase const*> m_events;
@@ -67,6 +66,24 @@ struct BusyInterface
   BusyInterface() : m_busy_depth(0) { }
   bool set_busy() { return m_busy_depth.fetch_add(1) == 0; }
   bool unset_busy() { return m_busy_depth.fetch_sub(1) == 1; }
+
+  void push(QueuedEventBase const* new_queued_event)
+  {
+    std::lock_guard<std::mutex> lock(m_events_mutex);
+    m_events.push_back(new_queued_event);
+  }
+
+  QueuedEventBase const* pop()
+  {
+    QueuedEventBase const* queued_event = nullptr;
+    std::lock_guard<std::mutex> lock(m_events_mutex);
+    if (!m_events.empty())
+    {
+      queued_event = m_events.front();
+      m_events.pop_front();
+    }
+    return queued_event;
+  }
 };
 
 template<typename TYPE>
@@ -76,6 +93,7 @@ template<typename TYPE>
 class Request
 {
   static constexpr int s_cancel_marker = 0x10000;
+  static utils::NodeMemoryPool s_queued_event_memory_pool;
 
  private:
   friend class Server<TYPE>;
@@ -196,7 +214,6 @@ class Server
   std::mutex m_request_list_mutex;              // Locked when changing any Request<TYPE>* that is part of m_request_list,
   Request<TYPE>* m_request_list;                // so that integrity of m_request_list is guaranteed when the mutex is not locked.
   utils::NodeMemoryPool m_request_memory_pool;
-  utils::NodeMemoryPool m_queued_event_memory_pool;
 
   // Insert the newly allocated new_request in the front of the list.
   void push_front(Request<TYPE>* new_request)
@@ -215,7 +232,7 @@ class Server
   }
 
  public:
-  Server() : m_request_list(nullptr), m_request_memory_pool(64, sizeof(Request<TYPE>)), m_queued_event_memory_pool(32, sizeof(QueuedEvent<TYPE>)) { }
+  Server() : m_request_list(nullptr), m_request_memory_pool(64, sizeof(Request<TYPE>)) { }
 
   void trigger(TYPE const& data);
 
@@ -290,11 +307,6 @@ class Server
     push_front(request);
     Dout(dc::finish, "--> [" << (void*)request << ']');
     return request;
-  }
-
-  QueuedEvent<TYPE>* alloc_queued_event(Request<TYPE>* request, TYPE const* data)
-  {
-    return new (m_queued_event_memory_pool) QueuedEvent<TYPE>(request, *data);
   }
 };
 
@@ -390,28 +402,18 @@ void Request<TYPE>::handle_bi(Server<TYPE>* server, TYPE const* data)
   if (!m_busy_interface->set_busy())
   {
     Dout(dc::notice, "Queuing event because busy interface is busy.");
-    // Queue sequence.
-    QueuedEventBase const* new_queued_event = server->alloc_queued_event(this, data);
-    std::lock_guard<std::mutex> lock(m_busy_interface->m_events_mutex);
-    m_busy_interface->m_events.push_back(new_queued_event);
+    QueuedEventBase const* new_queued_event = new (s_queued_event_memory_pool) QueuedEvent<TYPE>(this, *data);
+    m_busy_interface->push(new_queued_event);
   }
   else
-  {
     m_callback(*data);
-  }
   // Atomically decrement the "busy counter" of the busy interface.
   while (m_busy_interface->unset_busy())        // Exit this function if there are one or more other threads above us (let the last thread to get here handle the queue).
   {
     Dout(dc::notice, "Unset_busy returned true: this thread is responsible for emptying the queue.");
-    // Pop and callback sequence.
-    QueuedEventBase const* queued_event = nullptr;
-    {
-      std::lock_guard<std::mutex> lock(m_busy_interface->m_events_mutex);
-      if (m_busy_interface->m_events.empty())
-        break;                                  // No events left in the queue: we're done.
-      queued_event = m_busy_interface->m_events.front();
-      m_busy_interface->m_events.pop_front();
-    }
+    QueuedEventBase const* queued_event = m_busy_interface->pop();
+    if (!queued_event)
+      break;                                    // No events left in the queue: we're done.
     Dout(dc::notice|continued_cf, "Processing one event from the queue... ");
     if (m_busy_interface->set_busy())           // After this set_busy() call we need to return to the top of the while loop of course, to call unset_busy().
     {
@@ -425,8 +427,7 @@ void Request<TYPE>::handle_bi(Server<TYPE>* server, TYPE const* data)
       // and we won't retry to process this same event again.
       // Put the event back in the front of the queue so that the thread that caused
       // rehandle to fail will process this event first once it is done.
-      std::lock_guard<std::mutex> lock(m_busy_interface->m_events_mutex);
-      m_busy_interface->m_events.push_front(queued_event);
+      m_busy_interface->push(queued_event);
     }
     Dout(dc::finish, "done");
   }
@@ -449,5 +450,9 @@ void Request<TYPE>::cancel()
     m_cancel_cv.wait(lock, [this]{ return m_handle_count == -s_cancel_marker; });
   }
 }
+
+// Instantiate a per-TYPE memory pool for queued events.
+template<typename TYPE>
+utils::NodeMemoryPool Request<TYPE>::s_queued_event_memory_pool(32, sizeof(QueuedEvent<TYPE>));
 
 } // namespace event
