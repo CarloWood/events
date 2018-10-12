@@ -1,4 +1,5 @@
-Non-Blocking Critical Area.
+Non-Blocking Critical Area
+==========================
 
 How to create an area that doesn't keep a mutex locked while inside it,
 but that nevertheless is a critical area (only one thread at a time
