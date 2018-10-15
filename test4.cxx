@@ -77,15 +77,22 @@ class MyEventType2 : public MyEventData
 events::Server<MyEventType1> server1;
 events::Server<MyEventType2> server2;
 
+std::atomic_int count1;
+std::atomic_int count2;
+
+int constexpr loop_size = 100000;
+
 // Whenever the events happen, call their respective trigger function.
 void run1()
 {
   Debug(debug::init_thread());
   MyEventType1 my_event_data(1, 0);
-  for (;;)
+  for (int i = 0; i < loop_size; ++i)
   {
     server1.trigger(my_event_data);
-    ++my_event_data.y;
+    my_event_data.y = ++count1;
+    if (my_event_data.y > count2)
+      std::this_thread::sleep_for(std::chrono::microseconds(1));
   }
 }
 
@@ -93,11 +100,12 @@ void run2()
 {
   Debug(debug::init_thread());
   MyEventType2 my_event_data(2, 0);
-  for (;;)
+  for (int i = 0; i < loop_size; ++i)
   {
     server2.trigger(my_event_data);
-    ++my_event_data.y;
-    std::this_thread::sleep_for(std::chrono::microseconds(20));
+    my_event_data.y = ++count2;
+    if (my_event_data.y > count1)
+      std::this_thread::sleep_for(std::chrono::microseconds(1));
   }
 }
 
@@ -111,6 +119,7 @@ class MyClient
   void callback2(MyEventType2 const& data);      // To be called when event 2 happens.
 
   events::BusyInterface m_busy_interface;       // The busy interface for this object.
+  events::BusyInterface m_busy_interface2;       // The busy interface for this object.
   events::RequestHandle<MyEventType1> m_handle1;
   events::RequestHandle<MyEventType2> m_handle2;
 
@@ -134,12 +143,15 @@ void MyClient::request()
   m_handle2 = server2.request(*this, &MyClient::callback2, m_busy_interface);
 }
 
+int cb_count1;
+int cb_count2;
+
 void MyClient::callback1(MyEventType1 const& data)
 {
   ASSERT(m_inside.fetch_add(1) == 0);
   static BalanceTimes times;
   BalanceSleep sleep(times);
-  Dout(dc::notice, "callback1({ " <<  data.x << ", " << data.y << "})");
+  ++cb_count1;
   m_inside.fetch_sub(1);
 }
 
@@ -148,7 +160,7 @@ void MyClient::callback2(MyEventType2 const& data)
   ASSERT(m_inside.fetch_add(1) == 0);
   static BalanceTimes times;
   BalanceSleep sleep(times);
-  Dout(dc::notice, "callback2({ " <<  data.x << ", " << data.y << "})");
+  ++cb_count2;
   m_inside.fetch_sub(1);
 }
 
@@ -156,12 +168,15 @@ int main()
 {
   Debug(debug::init());
 
-  std::thread t1(run1);
-  std::thread t2(run2);
-
   MyClient client;
   client.request();
 
+  std::thread t1(run1);
+  std::thread t2(run2);
+
   t1.join();
   t2.join();
+
+  Dout(dc::notice, "cb_count1 = " << cb_count1 << "; cb_count2 = " << cb_count2);
+  ASSERT(cb_count1 = loop_size && cb_count2 == loop_size);
 }
