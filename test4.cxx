@@ -146,7 +146,7 @@ void MyClient::request()
 int cb_count1;
 int cb_count2;
 
-void MyClient::callback1(MyEventType1 const& data)
+void MyClient::callback1(MyEventType1 const& UNUSED_ARG(data))
 {
   ASSERT(m_inside.fetch_add(1) == 0);
   static BalanceTimes times;
@@ -155,7 +155,7 @@ void MyClient::callback1(MyEventType1 const& data)
   m_inside.fetch_sub(1);
 }
 
-void MyClient::callback2(MyEventType2 const& data)
+void MyClient::callback2(MyEventType2 const& UNUSED_ARG(data))
 {
   ASSERT(m_inside.fetch_add(1) == 0);
   static BalanceTimes times;

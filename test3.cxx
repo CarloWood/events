@@ -48,7 +48,7 @@ class Foo
   static std::thread s_trigger_threads[N];
   static std::atomic_int thr;
 
-  void foo(FooType const& type, Cookie, int n)
+  void foo(FooType const& DEBUG_ONLY(type), Cookie, int DEBUG_ONLY(n))
   {
     DoutEntering(dc::notice, "Foo::foo(" << type << ", " << n << ")");
     ASSERT(m_magic == 12345678);

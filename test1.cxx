@@ -25,19 +25,19 @@ struct MyEventType : public MyEventData
   static constexpr bool one_shot = true;
 };
 
-void my_callback(MyEventType const& event)
+void my_callback(MyEventType const& DEBUG_ONLY(event))
 {
   DoutEntering(dc::notice, "my_callback(" << event << ")");
 }
 
 struct Foo
 {
-  void callback(MyEventType const& event) const
+  void callback(MyEventType const& DEBUG_ONLY(event)) const
   {
     DoutEntering(dc::notice, "Foo::callback(" << event << ")");
   }
 
-  void callback_with_cookie(MyEventType const& event, double cookie) const
+  void callback_with_cookie(MyEventType const& DEBUG_ONLY(event), double DEBUG_ONLY(cookie)) const
   {
     DoutEntering(dc::notice, "Foo::callback_with_cookie(" << event << ", " << cookie << ")");
   }
@@ -67,7 +67,7 @@ int main()
   foo_request[2] = event_server.request(foo, &Foo::callback_with_cookie, 0.999);
 
   // Use a lambda function as callback.
-  auto handle2 = event_server.request([cookie](MyEventType const& event){ Dout(dc::notice, "Calling lambda for event " << event << " and cookie " << cookie); });
+  auto handle2 = event_server.request([cookie](MyEventType const& DEBUG_ONLY(event)){ Dout(dc::notice, "Calling lambda for event " << event << " and cookie " << cookie); });
 
   // Trigger the event.
   event_server.trigger(42);
