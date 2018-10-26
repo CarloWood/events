@@ -85,7 +85,7 @@ int constexpr loop_size = 100000;
 // Whenever the events happen, call their respective trigger function.
 void run1()
 {
-  Debug(debug::init_thread());
+  Debug(NAMESPACE_DEBUG::init_thread());
   MyEventType1 my_event_data(1, 0);
   for (int i = 0; i < loop_size; ++i)
   {
@@ -98,7 +98,7 @@ void run1()
 
 void run2()
 {
-  Debug(debug::init_thread());
+  Debug(NAMESPACE_DEBUG::init_thread());
   MyEventType2 my_event_data(2, 0);
   for (int i = 0; i < loop_size; ++i)
   {
@@ -166,7 +166,7 @@ void MyClient::callback2(MyEventType2 const& UNUSED_ARG(data))
 
 int main()
 {
-  Debug(debug::init());
+  Debug(NAMESPACE_DEBUG::init());
 
   MyClient client;
   client.request();
