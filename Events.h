@@ -218,7 +218,7 @@ class Request
 
   void cancel();
 
-#ifdef CWDEBUG
+#if CW_DEBUG
   bool is_canceled() const { return m_handle_count == -s_cancel_marker; }
 #endif
 };
