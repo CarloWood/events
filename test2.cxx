@@ -59,12 +59,12 @@ class MyEventClient1
   events::BusyInterface m_bi[2];        // 0 = foo, 1 = bar.
 
  public:
-  void handle_foo(FooEventType const& DEBUG_ONLY(data))
+  void handle_foo(FooEventType const& CWDEBUG_ONLY(data))
   {
     DoutEntering(dc::notice, "MyEventClient1::foo(" << data << ")");
     ASSERT(m_magic == 12345678);
   }
-  void handle_bar(BarEventType const& DEBUG_ONLY(data))
+  void handle_bar(BarEventType const& CWDEBUG_ONLY(data))
   {
     DoutEntering(dc::notice, "MyEventClient1::bar(" << data << ")");
   }
@@ -83,7 +83,7 @@ class MyEventClient2
 {
   int m_magic;
  public:
-  void handle_foo(FooEventType const& DEBUG_ONLY(data), Cookie DEBUG_ONLY(cookie))
+  void handle_foo(FooEventType const& CWDEBUG_ONLY(data), Cookie DEBUG_ONLY(cookie))
   {
     DoutEntering(dc::notice, "MyEventClient2::foo(" << data << ")");
     ASSERT(cookie == 123);
