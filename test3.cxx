@@ -29,7 +29,7 @@ int constexpr N = 6;
 
 void do_trigger()
 {
-  static std::atomic_int count;
+  static std::atomic_int count = ATOMIC_VAR_INIT(0);
   if (count == N - 2)
     return;
   ++count;
@@ -69,7 +69,7 @@ class Foo
 };
 
 std::thread Foo::s_trigger_threads[N];
-std::atomic_int Foo::thr;
+std::atomic_int Foo::thr = ATOMIC_VAR_INIT(0);
 
 int main()
 {

@@ -77,8 +77,8 @@ class MyEventType2 : public MyEventData
 events::Server<MyEventType1> server1;
 events::Server<MyEventType2> server2;
 
-std::atomic_int count1;
-std::atomic_int count2;
+std::atomic_int count1 = ATOMIC_VAR_INIT(0);
+std::atomic_int count2 = ATOMIC_VAR_INIT(0);
 
 int constexpr loop_size = 100000;
 
