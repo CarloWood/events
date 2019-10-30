@@ -67,7 +67,7 @@ int main()
   foo_request[2] = event_server.request(foo, &Foo::callback_with_cookie, 0.999);
 
   // Use a lambda function as callback.
-  auto handle2 = event_server.request([cookie](MyEventType const& CWDEBUG_ONLY(event)){ Dout(dc::notice, "Calling lambda for event " << event << " and cookie " << cookie); });
+  auto handle2 = event_server.request([CWDEBUG_ONLY(cookie)](MyEventType const& CWDEBUG_ONLY(event)){ Dout(dc::notice, "Calling lambda for event " << event << " and cookie " << cookie); });
 
   // Trigger the event.
   event_server.trigger(42);
