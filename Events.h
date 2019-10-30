@@ -110,7 +110,7 @@ NAMESPACE_DEBUG_CHANNELS_END
 
 namespace events {
 
-struct QueuedEventBase;
+class QueuedEventBase;
 
 struct BusyInterface
 {
