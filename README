@@ -119,7 +119,7 @@ count, causing no thread to ever enter the Non-blocking critical
 area anymore: every subsequent event would be queued. Also, the
 code that causes an event and calls handle should be decoupled
 from clients requesting callbacks. If a callback would throw an
-exception then there is reason to assume the caller here can
+exception then there is reason to assume the caller here can't
 even know about it, let alone handle it.
 
 Secondly, this makes unnecessary copies of 'type'.
@@ -197,7 +197,7 @@ we can almost literally translate the above handle() function into:
     }
   }
 
-One of the many problems with this is is that events pushed to the queue
+One of the many problems with this is that events pushed to the queue
 might be of a different TYPE than TYPE in the Request<TYPE::handle_bi
 that pops them. So, the 'data' that was popped at the bottom might not
 need to be passed to the m_callback of *this* Request object. What is
@@ -206,7 +206,7 @@ m_callback) to the queue as well.
 
 All in all, it means that 'data' pointers popped from the queue need to
 be handled differently than the one that we enter the function with.
-Therefore lets start with rewritting the above function as follows,
+Therefore lets start with rewriting the above function as follows,
 where we unwrap the loop for the first call to set_busy() + queue or
 callback:
 
