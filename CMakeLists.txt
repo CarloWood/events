@@ -42,15 +42,8 @@ target_compile_features( events_ObjLib
 # Set link dependencies.
 target_link_libraries( events_ObjLib
     PUBLIC
-        Threads::Threads
+        AICxx::utils
 )
-
-if ( OptionEnableLibcwd )
-  target_link_libraries( events_ObjLib
-      PUBLIC
-          PkgConfig::Libcwd_r
-)
-endif ()
 
 # Create an ALIAS target.
 add_library( AICxx::events ALIAS events_ObjLib )
