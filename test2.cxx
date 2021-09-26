@@ -97,7 +97,7 @@ class MyEventClient2
 //
 // start
 //
-// Application initialisation.
+// Application initialization.
 //
 
 int main()
