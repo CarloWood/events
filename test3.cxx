@@ -18,7 +18,7 @@ class Data
 struct FooType : public Data
 {
   using Data::Data;
-  static bool constexpr one_shot = false;
+  static constexpr bool one_shot = false;
 };
 
 struct Cookie { };
