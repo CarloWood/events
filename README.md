@@ -40,9 +40,10 @@ For example,
 ```
 
 The root project should be using
-[autotools](https://en.wikipedia.org/wiki/GNU_Build_System_autotools),
+[autotools](https://en.wikipedia.org/wiki/GNU_Build_System_autotools) or
+[cmake](https://cmake.org/),
 [cwm4](https://github.com/CarloWood/cwm4) and
-[libcwd](https://github.com/CarloWood/libcwd).
+[cwds](https://github.com/CarloWood/cwds).
 
 ## Checking out a project that uses the events submodule.
 
@@ -51,14 +52,27 @@ To clone a project example-project that uses events simply run:
 <pre>
 <b>git clone --recursive</b> &lt;<i>URL-to-project</i>&gt;<b>/example-project.git</b>
 <b>cd example-project</b>
-<b>./autogen.sh</b>
+<b>AUTOGEN_CMAKE_ONLY=1 ./autogen.sh</b>
 </pre>
 
-The <tt>--recursive</tt> is optional because <tt>./autogen.sh</tt> will fix
+The ``--recursive`` is optional because ``./autogen.sh`` will fix
 it when you forgot it.
 
-Afterwards you probably want to use <tt>--enable-mainainer-mode</tt>
-as option to the generated <tt>configure</tt> script.
+When using [GNU autotools](https://en.wikipedia.org/wiki/GNU_Autotools) you should of course
+not set ``AUTOGEN_CMAKE_ONLY``. Also, you probably want to use ``--enable-mainainer-mode``
+as option to the generated ``configure`` script. ***WARNING: autotools are no longer tested (supported) by the author***
+
+In order to use ``cmake`` configure as usual, for example to do a debug build with 16 cores:
+
+    mkdir build_debug
+    cmake -S . -B build_debug -DCMAKE_MESSAGE_LOG_LEVEL=DEBUG -DCMAKE_BUILD_TYPE=Debug -DCMAKE_VERBOSE_MAKEFILE=ON
+    cmake --build build_debug --config Debug --parallel 16
+
+Or to make a release build:
+
+    mkdir build_release
+    cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release
+    cmake --build build_release --config Release --parallel 16
 
 ## Adding the events submodule to a project
 
@@ -75,33 +89,7 @@ git submodule add https://github.com/CarloWood/events.git
 This should clone events into the subdirectory <tt>events</tt>, or
 if you already cloned it there, it should add it.
 
-Changes to <tt>configure.ac</tt> and <tt>Makefile.am</tt>
-are taken care of by <tt>cwm4</tt>, except for linking
-which works as usual;
-
-for example, a module that defines a
-
-```
-bin_PROGRAMS = foobar
-```
-
-would also define
-
-```
-foobar_CXXFLAGS = @LIBCWD_R_FLAGS@
-foobar_LDADD = ../events/libevents.la ../utils/libutils_r.la ../cwds/libcwds_r.la
-```
-
-or whatever the path to `events` is, to link with the required submodules,
-libraries, and assuming you also use the [cwds](https://github.com/CarloWood/cwds) submodule.
-
-Finally, run
-
-```
-./autogen.sh
-```
-
-to let cwm4 do its magic, and commit all the changes.
-
-Checkout [ai-statefultask-testsuite](https://github.com/CarloWood/ai-statefultask-testsuite)
-for an example of a project that uses this submodule.
+The instructions of adding any aicxx git submodule to a project
+are virtually the same, so please have a look at the instructions
+of [ai-utils](https://github.com/CarloWood/ai-utils/blob/master/README.md#adding-the-ai-utils-submodule-to-a-project)
+for further details.
