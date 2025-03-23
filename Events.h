@@ -289,6 +289,9 @@ struct QueuedEvent final : public QueuedEventBase
 template<typename TYPE>
 class Server
 {
+ public:
+  using event_type_type = TYPE;
+
  private:
   std::mutex m_request_list_mutex;              // Locked when changing any Request<TYPE>* that is part of m_request_list,
   Request<TYPE>* m_request_list;                // so that integrity of m_request_list is guaranteed when the mutex is not locked.
