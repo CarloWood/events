@@ -261,6 +261,7 @@ class RequestHandle
   RequestHandle() : m_request(nullptr) { }
   ~RequestHandle() { /* Call cancel() before destructing anything that is needed for the callback */ ASSERT(!m_request || m_request->is_canceled()); }
   RequestHandle(Request<TYPE>* request) : m_request(request) { }
+  RequestHandle(RequestHandle&& orig) : m_request(orig.m_request) { orig.m_request = nullptr; }
   RequestHandle& operator=(RequestHandle&& orig) { m_request = orig.m_request; orig.m_request = nullptr; return *this; }
   void cancel();
 };
