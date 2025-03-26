@@ -164,7 +164,7 @@ class Request
   Request* m_next;
 
 #ifdef CWDEBUG
-  bool silent_;                                 // Silence debug output during the callback.
+  bool silent_ = false;                         // Silence debug output during the callback.
 #endif
 
  protected:
