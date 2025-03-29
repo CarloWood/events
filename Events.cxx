@@ -26,7 +26,6 @@
  */
 
 #include "sys.h"
-#include "debug.h"
 #include "Events.h"
 
 #ifdef CWDEBUG
