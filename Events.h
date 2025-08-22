@@ -96,13 +96,13 @@ class MyClient {
 
 #pragma once
 
-#include "debug.h"
-#include "utils/NodeMemoryPool.h"
+#include "memory/NodeMemoryPool.h"
 #include "utils/macros.h"
-#include <functional>
-#include <condition_variable>
 #include <atomic>
+#include <condition_variable>
 #include <deque>
+#include <functional>
+#include "debug.h"
 
 #if defined(CWDEBUG) && !defined(DOXYGEN)
 NAMESPACE_DEBUG_CHANNELS_START
@@ -239,7 +239,7 @@ class Request
 template<typename TYPE>
 class RequestWithBI final : public Request<TYPE>
 {
-  static utils::NodeMemoryPool s_queued_event_memory_pool;
+  static memory::NodeMemoryPool s_queued_event_memory_pool;
 
  private:
   BusyInterface* m_busy_interface;      // Busy interface to be used for this request.
@@ -285,7 +285,7 @@ class QueuedEventBase
  public:
   virtual ~QueuedEventBase() { }
   virtual void rehandle() const = 0;
-  void operator delete(void* ptr, size_t) { utils::NodeMemoryPool::static_free(ptr); }
+  void operator delete(void* ptr, size_t) { memory::NodeMemoryPool::static_free(ptr); }
 };
 
 template<typename TYPE>
@@ -309,7 +309,7 @@ class Server
  private:
   std::mutex m_request_list_mutex;              // Locked when changing any Request<TYPE>* that is part of m_request_list,
   Request<TYPE>* m_request_list;                // so that integrity of m_request_list is guaranteed when the mutex is not locked.
-  utils::NodeMemoryPool m_request_memory_pool;  // Used to allocate both Request<TYPE> and RequestWithBI<TYPE> objects.
+  memory::NodeMemoryPool m_request_memory_pool;  // Used to allocate both Request<TYPE> and RequestWithBI<TYPE> objects.
 
   // Insert the newly allocated new_request in the front of the list.
   void push_front(Request<TYPE>* new_request)
@@ -549,6 +549,6 @@ void Request<TYPE>::cancel()
 
 // Instantiate a per-TYPE memory pool for queued events.
 template<typename TYPE>
-utils::NodeMemoryPool RequestWithBI<TYPE>::s_queued_event_memory_pool(32, sizeof(QueuedEvent<TYPE>));
+memory::NodeMemoryPool RequestWithBI<TYPE>::s_queued_event_memory_pool(32, sizeof(QueuedEvent<TYPE>));
 
 } // namespace events
