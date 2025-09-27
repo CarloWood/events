@@ -51,13 +51,13 @@ set(AICXX_OBJECTS_LIST AICxx::events ${AICXX_OBJECTS_LIST} CACHE INTERNAL "List 
 #
 
 add_executable(test1 EXCLUDE_FROM_ALL test1.cxx)
-target_link_libraries(test1 PRIVATE AICxx::events AICxx::utils AICxx::cwds)
+target_link_libraries(test1 PRIVATE AICxx::events AICxx::memory AICxx::utils AICxx::cwds)
 
 add_executable(test2 EXCLUDE_FROM_ALL test2.cxx)
-target_link_libraries(test2 PRIVATE AICxx::events AICxx::utils AICxx::cwds)
+target_link_libraries(test2 PRIVATE AICxx::events AICxx:memory AICxx::utils AICxx::cwds)
 
 add_executable(test3 EXCLUDE_FROM_ALL test3.cxx)
-target_link_libraries(test3 PRIVATE AICxx::events AICxx::utils AICxx::cwds)
+target_link_libraries(test3 PRIVATE AICxx::events AICxx::memory AICxx::utils AICxx::cwds)
 
 add_executable(test4 EXCLUDE_FROM_ALL test4.cxx)
-target_link_libraries(test4 PRIVATE AICxx::events AICxx::utils AICxx::cwds)
+target_link_libraries(test4 PRIVATE AICxx::events AICxx::memory AICxx::utils AICxx::cwds)
