@@ -30,6 +30,6 @@
 
 #ifdef CWDEBUG
 NAMESPACE_DEBUG_CHANNELS_START
-channel_ct events("EVENTS");
+Channel events("EVENTS");
 NAMESPACE_DEBUG_CHANNELS_END
 #endif
