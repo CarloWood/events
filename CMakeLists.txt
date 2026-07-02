@@ -54,7 +54,7 @@ add_executable(test1 EXCLUDE_FROM_ALL test1.cxx)
 target_link_libraries(test1 PRIVATE AICxx::events AICxx::memory AICxx::utils AICxx::cwds)
 
 add_executable(test2 EXCLUDE_FROM_ALL test2.cxx)
-target_link_libraries(test2 PRIVATE AICxx::events AICxx:memory AICxx::utils AICxx::cwds)
+target_link_libraries(test2 PRIVATE AICxx::events AICxx::memory AICxx::utils AICxx::cwds)
 
 add_executable(test3 EXCLUDE_FROM_ALL test3.cxx)
 target_link_libraries(test3 PRIVATE AICxx::events AICxx::memory AICxx::utils AICxx::cwds)
